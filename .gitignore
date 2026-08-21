@@ -1,0 +1,20 @@
+# Build output
+.build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Card artwork is deliberately NOT tracked.
+#
+# The app fetches or imports illustrations onto each user's own device at
+# runtime; they never enter this repository. Publishing card art here would
+# make this project the distributor of someone else's copyrighted work, which
+# is the one thing an open-source fan project cannot afford to do.
+#
+# If you add art locally for testing, it lives in the app's Application Support
+# container, not here — but these rules exist so a stray copy cannot be
+# committed by accident.
+NTCGSimulator/Resources/CardArt/
+NTCGSimulator/Resources/cards/
+**/CardArt/
+*.webp

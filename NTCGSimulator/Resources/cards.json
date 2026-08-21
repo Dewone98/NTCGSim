@@ -1,0 +1,1209 @@
+[
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "effect" : "Turn this face up during Refresh to pay for a card.",
+    "id" : "C-001",
+    "name" : "Chakra Card",
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Special"
+    ],
+    "type" : "chakra"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "effect" : "Turn this face up during Refresh to pay for a card.",
+    "id" : "CP-001",
+    "name" : "Chakra Card",
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Special"
+    ],
+    "type" : "chakra"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 3,
+    "effect" : "Place in the Summon zone. Its bearer gains +1 power while it stays there.",
+    "id" : "S-001",
+    "name" : "Summon Card",
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Special"
+    ],
+    "type" : "summon"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "damage" : 1,
+    "effect" : "Once per turn, when a Character you control is sent to the Trash, draw a card.",
+    "id" : "N-001",
+    "leaderAbility" : {
+      "drawCard" : {
+
+      }
+    },
+    "life" : 15,
+    "name" : "Naruto Uzumaki",
+    "power" : 5,
+    "rarity" : "L",
+    "setCode" : "01",
+    "traits" : [
+      "Team 7",
+      "Hidden Leaf Village",
+      "Jinchuriki"
+    ],
+    "type" : "leader"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "When this Character is summoned, it gains +2 power until the end of the turn.",
+    "health" : 4,
+    "id" : "N-004",
+    "name" : "Naruto Uzumaki",
+    "power" : 4,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Team 7",
+      "Jinchuriki"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 4,
+    "damage" : 2,
+    "effect" : "This Character cannot be blocked by Characters with 3 or less power.",
+    "health" : 7,
+    "id" : "N-005",
+    "name" : "Gamabunta",
+    "power" : 7,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Toad",
+      "Mount Myoboku"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "When you play a Summon, this Character gains +1 damage this turn.",
+    "health" : 5,
+    "id" : "N-006",
+    "name" : "Jiraiya",
+    "power" : 5,
+    "rarity" : "SB",
+    "setCode" : "01",
+    "traits" : [
+      "The Legendary Sannin",
+      "Toad"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 5,
+    "damage" : 2,
+    "effect" : "When summoned, return one opposing Character with 4 or less power to its owner's hand.",
+    "health" : 6,
+    "id" : "N-007",
+    "name" : "Minato Namikaze",
+    "power" : 8,
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "Hidden Leaf Village",
+      "The Five Kage"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "While you control another Team 7 Character, this Character gains +1 power.",
+    "health" : 5,
+    "id" : "K-039",
+    "name" : "Kakashi Hatake",
+    "power" : 5,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Team 7",
+      "Lightning"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 1,
+    "damage" : 1,
+    "effect" : "When summoned, restore 1 life to your Leader.",
+    "health" : 3,
+    "id" : "N-030",
+    "name" : "Sakura Haruno",
+    "power" : 2,
+    "rarity" : "C",
+    "setCode" : "01",
+    "supportText" : "Support: instead of summoning, restore 2 life to your Leader.",
+    "traits" : [
+      "Team 7",
+      "Hidden Leaf Village"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "This Character may attack the turn it is summoned.",
+    "health" : 3,
+    "id" : "N-031",
+    "name" : "Boruto Uzumaki",
+    "power" : 3,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Hidden Leaf Village",
+      "Wind"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 4,
+    "damage" : 2,
+    "effect" : "During your Refresh, restore 1 life to your Leader.",
+    "health" : 8,
+    "id" : "N-032",
+    "name" : "Tsunade",
+    "power" : 6,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "The Legendary Sannin",
+      "The Five Kage"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 6,
+    "damage" : 3,
+    "effect" : "When summoned, deal 2 damage to every opposing Character.",
+    "health" : 9,
+    "id" : "N-033",
+    "name" : "Naruto Uzumaki",
+    "power" : 9,
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "Jinchuriki",
+      "Team 7"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 1,
+    "damage" : 1,
+    "effect" : "This Character is sent to the Trash at the end of your turn.",
+    "health" : 2,
+    "id" : "N-034",
+    "name" : "Shadow Clone",
+    "power" : 3,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Special",
+      "Taijutsu"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "When summoned, an opposing Character loses 3 power this turn.",
+    "health" : 3,
+    "id" : "N-035",
+    "name" : "Rasengan",
+    "power" : 4,
+    "rarity" : "C",
+    "setCode" : "01",
+    "supportText" : "Support: instead of summoning, an opposing Character loses 5 power this turn.",
+    "traits" : [
+      "Special",
+      "Wind"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 1,
+    "damage" : 1,
+    "effect" : "When summoned, draw a card if you control a Team 7 Character.",
+    "health" : 3,
+    "id" : "N-036",
+    "name" : "Iruka Umino",
+    "power" : 2,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Hidden Leaf Village"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 4,
+    "damage" : 2,
+    "effect" : "This Character gains +2 power while attacking.",
+    "health" : 5,
+    "id" : "N-037",
+    "name" : "Might Guy",
+    "power" : 7,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Hidden Leaf Village",
+      "Taijutsu"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "This Character cannot be targeted by effects that reduce power.",
+    "health" : 3,
+    "id" : "N-038",
+    "name" : "Rock Lee",
+    "power" : 4,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Taijutsu",
+      "Hidden Leaf Village"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 5,
+    "damage" : 2,
+    "effect" : "While this Character is on the board, your Leader takes 1 less damage.",
+    "health" : 7,
+    "id" : "N-039",
+    "name" : "Toad Sage Mode",
+    "power" : 8,
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "Mount Myoboku",
+      "Special"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 7,
+    "damage" : 3,
+    "effect" : "EX: you may only control one EX Character. When summoned, draw two cards.",
+    "health" : 10,
+    "id" : "N-040",
+    "name" : "Kurama",
+    "power" : 11,
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "Jinchuriki",
+      "Special"
+    ],
+    "type" : "exCharacter"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "EX: you may only control one EX Character. Gains +2 power while you control a Summon.",
+    "health" : 5,
+    "id" : "N-041",
+    "name" : "Gamakichi",
+    "power" : 5,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Toad",
+      "Mount Myoboku"
+    ],
+    "type" : "exCharacter"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "damage" : 1,
+    "effect" : "Once per turn, when this Leader is attacked, an opposing Character loses 2 power.",
+    "id" : "N-012",
+    "leaderAbility" : {
+      "weakenCharacter" : {
+        "power" : 2
+      }
+    },
+    "life" : 15,
+    "name" : "Sasuke Uchiha",
+    "power" : 5,
+    "rarity" : "L",
+    "setCode" : "01",
+    "traits" : [
+      "Uchiha Clan",
+      "The Taka",
+      "Illusion"
+    ],
+    "type" : "leader"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 5,
+    "damage" : 2,
+    "effect" : "When summoned, an opposing Character cannot attack during its controller's next turn.",
+    "health" : 6,
+    "id" : "N-013",
+    "name" : "Itachi Uchiha",
+    "power" : 8,
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "Uchiha Clan",
+      "Akatsuki"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "While your Leader is Sasuke Uchiha, this Character gains +1 damage.",
+    "health" : 5,
+    "id" : "N-015",
+    "name" : "Sasuke Uchiha",
+    "power" : 5,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Uchiha Clan",
+      "Team 7"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 4,
+    "damage" : 2,
+    "effect" : "When summoned, look at the top three cards of your deck and take one.",
+    "health" : 5,
+    "id" : "N-016",
+    "name" : "Shisui Uchiha",
+    "power" : 6,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Uchiha Clan",
+      "Illusion"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "This Character loses 2 power during your opponent's turn.",
+    "health" : 4,
+    "id" : "N-019",
+    "name" : "Jugo",
+    "power" : 6,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "The Taka",
+      "Village Hidden in the Sound"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "This Character cannot be destroyed by damage from Characters with 2 or less damage.",
+    "health" : 3,
+    "id" : "N-021",
+    "name" : "Suigetsu Hozuki",
+    "power" : 4,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "The Taka",
+      "Water"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 1,
+    "damage" : 1,
+    "effect" : "When summoned, restore 1 life to your Leader.",
+    "health" : 3,
+    "id" : "N-010",
+    "name" : "Karin",
+    "power" : 2,
+    "rarity" : "C",
+    "setCode" : "01",
+    "supportText" : "Support: instead of summoning, draw a card.",
+    "traits" : [
+      "The Taka",
+      "Village Hidden in the Sound"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 5,
+    "damage" : 2,
+    "effect" : "When an opposing Character is sent to the Trash, draw a card.",
+    "health" : 7,
+    "id" : "N-023",
+    "name" : "Orochimaru",
+    "power" : 7,
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "The Legendary Sannin",
+      "Snake"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "When summoned, your opponent discards a card.",
+    "health" : 4,
+    "id" : "N-024",
+    "name" : "Orochimaru",
+    "power" : 5,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Snake",
+      "Village Hidden in the Sound"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "During your Refresh, you may return a Character from your Trash to your hand.",
+    "health" : 4,
+    "id" : "N-025",
+    "name" : "Kabuto Yakushi",
+    "power" : 3,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Village Hidden in the Sound"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "When summoned, deal 3 damage to an opposing Character.",
+    "health" : 3,
+    "id" : "N-026",
+    "name" : "Chidori",
+    "power" : 4,
+    "rarity" : "C",
+    "setCode" : "01",
+    "supportText" : "Support: instead of summoning, deal 4 damage to an opposing Character.",
+    "traits" : [
+      "Lightning",
+      "Special"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 4,
+    "damage" : 2,
+    "effect" : "When summoned, send an opposing Character with 5 or less health to the Trash.",
+    "health" : 4,
+    "id" : "N-027",
+    "name" : "Amaterasu",
+    "power" : 6,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Fire",
+      "Illusion"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 7,
+    "damage" : 3,
+    "effect" : "When summoned, every opposing Character loses 3 power this turn.",
+    "health" : 9,
+    "id" : "N-028",
+    "name" : "Madara Uchiha",
+    "power" : 10,
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "Uchiha Clan",
+      "Akatsuki"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 5,
+    "damage" : 2,
+    "effect" : "This Character cannot be attacked during your opponent's next turn after it is summoned.",
+    "health" : 6,
+    "id" : "N-029",
+    "name" : "Obito Uchiha",
+    "power" : 7,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Uchiha Clan",
+      "Akatsuki"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 1,
+    "damage" : 1,
+    "effect" : "When summoned, look at your opponent's hand.",
+    "health" : 2,
+    "id" : "N-042",
+    "name" : "Sharingan",
+    "power" : 2,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Illusion",
+      "Uchiha Clan"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 4,
+    "damage" : 2,
+    "effect" : "While attacking, this Character gains +1 power for each Water Character you control.",
+    "health" : 6,
+    "id" : "N-043",
+    "name" : "Kisame Hoshigaki",
+    "power" : 7,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Akatsuki",
+      "Water"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 6,
+    "damage" : 3,
+    "effect" : "EX: you may only control one EX Character. When summoned, deal 3 damage to an opposing Character.",
+    "health" : 8,
+    "id" : "N-014",
+    "name" : "Sasuke Uchiha",
+    "power" : 10,
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "Uchiha Clan",
+      "The Taka"
+    ],
+    "type" : "exCharacter"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 5,
+    "damage" : 2,
+    "effect" : "EX: you may only control one EX Character. When summoned, your opponent discards a card.",
+    "health" : 7,
+    "id" : "N-022",
+    "name" : "Manda",
+    "power" : 9,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Snake",
+      "Special"
+    ],
+    "type" : "exCharacter"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "damage" : 1,
+    "effect" : "Once per turn, when you summon a Team 8 Character, it gains +1 power this turn.",
+    "id" : "N-050",
+    "leaderAbility" : {
+      "empowerCharacter" : {
+        "power" : 1
+      }
+    },
+    "life" : 15,
+    "name" : "Hinata Hyuga",
+    "power" : 5,
+    "rarity" : "L",
+    "setCode" : "01",
+    "traits" : [
+      "Team 8",
+      "Hyuga Clan",
+      "Hidden Leaf Village"
+    ],
+    "type" : "leader"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "While this Character is on the board, opposing Characters cost 1 more to summon.",
+    "health" : 4,
+    "id" : "N-008",
+    "name" : "Shikamaru Nara",
+    "power" : 3,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Team 10",
+      "Hidden Leaf Village"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "When summoned, take control of an opposing Character with 2 or less power until end of turn.",
+    "health" : 3,
+    "id" : "N-011",
+    "name" : "Ino Yamanaka",
+    "power" : 4,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Team 10",
+      "Illusion"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "This Character gains +2 health while you control another Team 10 Character.",
+    "health" : 6,
+    "id" : "N-051",
+    "name" : "Choji Akimichi",
+    "power" : 6,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Team 10",
+      "Taijutsu"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "When summoned, an opposing Character loses 2 power this turn.",
+    "health" : 4,
+    "id" : "N-052",
+    "name" : "Hinata Hyuga",
+    "power" : 3,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Team 8",
+      "Hyuga Clan"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "This Character may attack the turn it is summoned.",
+    "health" : 3,
+    "id" : "N-053",
+    "name" : "Kiba Inuzuka",
+    "power" : 4,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Team 8",
+      "Hidden Leaf Village"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "During your Refresh, your opponent discards a card if they hold six or more.",
+    "health" : 5,
+    "id" : "N-054",
+    "name" : "Shino Aburame",
+    "power" : 5,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Team 8",
+      "Hidden Leaf Village"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 4,
+    "damage" : 2,
+    "effect" : "This Character ignores effects that would prevent it from attacking.",
+    "health" : 5,
+    "id" : "N-055",
+    "name" : "Neji Hyuga",
+    "power" : 7,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Hyuga Clan",
+      "Taijutsu"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "When summoned, draw a card if you control two or more Team 8 Characters.",
+    "health" : 5,
+    "id" : "N-056",
+    "name" : "Kurenai Yuhi",
+    "power" : 4,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Team 8",
+      "Illusion"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 4,
+    "damage" : 2,
+    "effect" : "While you control a Team 10 Character, this Character gains +1 damage.",
+    "health" : 6,
+    "id" : "N-057",
+    "name" : "Asuma Sarutobi",
+    "power" : 6,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Team 10",
+      "Wind"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 1,
+    "damage" : 1,
+    "effect" : "When summoned, an opposing Character cannot block this turn.",
+    "health" : 2,
+    "id" : "N-058",
+    "name" : "Gentle Fist",
+    "power" : 3,
+    "rarity" : "C",
+    "setCode" : "01",
+    "supportText" : "Support: instead of summoning, an opposing Character loses 3 power this turn.",
+    "traits" : [
+      "Taijutsu",
+      "Hyuga Clan"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 1,
+    "damage" : 1,
+    "effect" : "When summoned, look at the top two cards of your deck and reorder them.",
+    "health" : 3,
+    "id" : "N-059",
+    "name" : "Byakugan",
+    "power" : 2,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Hyuga Clan",
+      "Special"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 2,
+    "damage" : 1,
+    "effect" : "This Character gains +1 power for each Summon you control.",
+    "health" : 3,
+    "id" : "N-060",
+    "name" : "Tenten",
+    "power" : 4,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Hidden Leaf Village",
+      "Taijutsu"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 6,
+    "damage" : 3,
+    "effect" : "When summoned, restore 3 life to your Leader.",
+    "health" : 9,
+    "id" : "N-061",
+    "name" : "Hashirama Senju",
+    "power" : 9,
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "The Five Kage",
+      "Hidden Leaf Village"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 5,
+    "damage" : 2,
+    "effect" : "When summoned, return a Character from your Trash to your hand.",
+    "health" : 6,
+    "id" : "N-062",
+    "name" : "Tobirama Senju",
+    "power" : 8,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "The Five Kage",
+      "Water"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "During your Refresh, look at the top card of your deck and you may send it to the Trash.",
+    "health" : 4,
+    "id" : "N-063",
+    "name" : "Shikaku Nara",
+    "power" : 5,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Team 10",
+      "Hidden Leaf Village"
+    ],
+    "type" : "character"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 3,
+    "damage" : 1,
+    "effect" : "EX: you may only control one EX Character. Gains +2 power while you control Kiba Inuzuka.",
+    "health" : 4,
+    "id" : "N-064",
+    "name" : "Akamaru",
+    "power" : 5,
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Team 8",
+      "Special"
+    ],
+    "type" : "exCharacter"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 5,
+    "damage" : 2,
+    "effect" : "EX: you may only control one EX Character. During your Refresh, restore 1 life to your Leader.",
+    "health" : 8,
+    "id" : "N-065",
+    "name" : "Katsuyu",
+    "power" : 8,
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Special",
+      "Mount Myoboku"
+    ],
+    "type" : "exCharacter"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 2,
+    "effect" : "While this is in Support, your Characters have +1 power.",
+    "id" : "SP-R01",
+    "name" : "Shadow Clone Jutsu",
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Special",
+      "Taijutsu"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 3,
+    "effect" : "While this is in Support, your Leader takes 1 less damage.",
+    "id" : "SP-R02",
+    "name" : "Sage Mode",
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Mount Myoboku",
+      "Special"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 4,
+    "effect" : "While this is in Support, your Characters have +2 power.",
+    "id" : "SP-R03",
+    "name" : "Nine-Tails Chakra",
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "Jinchuriki"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "red",
+    "cost" : 5,
+    "effect" : "While this is in Support, your attacking Characters deal +1 damage.",
+    "id" : "SP-R04",
+    "name" : "Rasenshuriken",
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Wind",
+      "Special"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 2,
+    "effect" : "While this is in Support, your Characters have +1 power.",
+    "id" : "SP-B01",
+    "name" : "Sharingan Focus",
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Uchiha Clan",
+      "Illusion"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 3,
+    "effect" : "While this is in Support, your Characters have +1 damage.",
+    "id" : "SP-B02",
+    "name" : "Chidori Stream",
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Lightning",
+      "Special"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 5,
+    "effect" : "While this is in Support, your Leader takes 2 less damage.",
+    "id" : "SP-B03",
+    "name" : "Susanoo",
+    "rarity" : "SR",
+    "setCode" : "01",
+    "traits" : [
+      "Uchiha Clan"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "blue",
+    "cost" : 4,
+    "effect" : "While this is in Support, opposing Characters have 1 less power.",
+    "id" : "SP-B04",
+    "name" : "Curse Mark",
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Village Hidden in the Sound"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 2,
+    "effect" : "While this is in Support, your Characters have +1 power.",
+    "id" : "SP-G01",
+    "name" : "Byakugan Sight",
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Hyuga Clan",
+      "Special"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 3,
+    "effect" : "While this is in Support, your Characters have +1 damage.",
+    "id" : "SP-G02",
+    "name" : "Eight Trigrams",
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Hyuga Clan",
+      "Taijutsu"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 4,
+    "effect" : "While this is in Support, opposing Characters cannot block.",
+    "id" : "SP-G03",
+    "name" : "Shadow Possession",
+    "rarity" : "R",
+    "setCode" : "01",
+    "traits" : [
+      "Team 10",
+      "Illusion"
+    ],
+    "type" : "support"
+  },
+  {
+    "artist" : "Generated art",
+    "color" : "green",
+    "cost" : 3,
+    "effect" : "While this is in Support, your Leader restores 1 life each Refresh.",
+    "id" : "SP-G04",
+    "name" : "Mind Transfer",
+    "rarity" : "C",
+    "setCode" : "01",
+    "traits" : [
+      "Team 10",
+      "Illusion"
+    ],
+    "type" : "support"
+  }
+]
