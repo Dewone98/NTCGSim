@@ -17,7 +17,7 @@ struct JournalEntry: Identifiable, Hashable, Codable {
     let id: UUID
 
     /// Who the line belongs to — a player label, or `Journal.systemActor` for
-    /// turn and phase announcements.
+    /// turn and response-window announcements.
     let actor: String
 
     /// Sentence-case description of what happened, ending in a full stop.
@@ -79,7 +79,7 @@ struct Journal: RandomAccessCollection, Hashable, Codable {
         }
     }
 
-    /// Records an engine announcement — turn changes, phase changes, results.
+    /// Records an engine announcement — turn changes, response windows, results.
     mutating func system(_ message: String, at timestamp: Date = Date()) {
         record(actor: Journal.systemActor, message: message, at: timestamp)
     }

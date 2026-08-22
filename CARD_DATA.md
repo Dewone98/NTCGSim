@@ -27,7 +27,8 @@ A single JSON array of card objects.
     "damage": 1,
     "health": 4,
     "effect": "When this Character is summoned, it gains +2 power until the end of the turn.",
-    "supportText": "Support: instead of summoning, draw a card.",
+    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "canSetAsSupport": true,
     "artist": "Artist name",
     "artFilename": "N-004.png"
   }
@@ -40,18 +41,19 @@ A single JSON array of card objects.
 |---|---|---|---|
 | `id` | ✅ | string | Collector number. **Must be unique** — it is the card's identity everywhere in the app. |
 | `name` | ✅ | string | |
-| `type` | ✅ | enum | `leader`, `character`, `exCharacter`, `support`, `chakra`, `summon` |
+| `type` | ✅ | enum | `leader`, `character`, `exCharacter`, `chakra`, `summon`. **There is no `support` type** — Support is a mode, not a type; see `canSetAsSupport`. |
 | `color` | ✅ | enum | `red`, `blue`, `green` |
 | `rarity` | ✅ | enum | `C`, `R`, `SR`, `L`, `SB` |
 | `setCode` | ✅ | string | e.g. `"01"`. Drives the SET filter. |
 | `traits` | | string[] | Drives the TRAIT filter. Omit or `[]` for none. |
-| `cost` | | int | Chakra required **to play as a jutsu, or to play a Support card**. Summoning is always free. Omit for Leaders and Chakra cards. |
+| `cost` | | int | Chakra required **to play the card as a jutsu**, and the number printed on the left of its SUPPORT bar — what flipping it face-up to answer costs. Summoning and setting are always free. Omit for Leaders and Chakra cards. |
 | `power` | | int | Attack value. |
 | `damage` | | int | Life removed from a Leader on an unblocked hit. |
 | `health` | | int | Power absorbed before going to the Trash. |
 | `life` | | int | **Leaders only** — starting life. |
 | `effect` | | string | Rules text. Defaults to `""`. |
 | `supportText` | | string | Present only on cards that can be played as a jutsu. |
+| `canSetAsSupport` | | bool | True when the card prints a **SUPPORT bar** across its lower third, and so may be set face-down in a numbered Support slot. Defaults to `false`. |
 | `artist` | | string | Credit shown on the card detail screen. |
 | `artFilename` | | string | Filename inside the art folder. When absent, art is generated. |
 | `leaderAbility` | | object | **Leaders only.** The effect the player activates once per turn — see below. |
@@ -77,22 +79,25 @@ A Leader may carry one activated ability. It is encoded as a single-key object:
 | `empowerCharacter` | Give one of **your** characters +power until end of turn | friendly |
 | `weakenCharacter` | Remove power from an **opposing** character until end of turn | enemy |
 
-Abilities are free, usable once per turn during the main phase.
+Abilities are free, usable once per turn during their controller's turn. There are no
+phases: a turn is a single undivided state.
 
 ### A note on `cost`
 
-Summoning a Character costs **nothing**. A card's `cost` is charged only when it is
-played as a jutsu (via `supportText`) or when it is a `support` card. A deck with no
-Support cards and no Support lines has nothing to spend chakra on.
+Summoning a Character costs **nothing** — but it may only be done **once a turn**, and
+setting a card face-down as a Support costs nothing either and is not limited. A card's
+`cost` is charged in two places: when the card is played as a jutsu (via `supportText`),
+and when a face-down Support is flipped face-up to answer a response window. A deck with
+no `canSetAsSupport` cards and no Support lines has nothing to spend chakra on.
 
 ### What the app needs to be playable
 
 - At least one card with `type: "leader"` per colour you intend to use, each with `life`.
 - At least one `chakra` card (its art is used for the five Chakra on the board).
-- Enough `character` / `exCharacter` / `support` cards per colour to fill a legal deck:
+- Enough `character` / `exCharacter` cards per colour to fill a legal deck:
   **13 distinct cards minimum** (13 × 4 copies = 52 ≥ 50).
-- Some `support` cards, or characters with a `supportText` line — otherwise chakra has
-  no use and the game plays flat.
+- Some cards flagged `canSetAsSupport`, or with a `supportText` line — otherwise chakra
+  has no use, nothing can answer a response window, and the game plays flat.
 
 ---
 

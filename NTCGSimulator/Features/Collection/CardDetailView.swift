@@ -116,15 +116,15 @@ struct CardDetailView: View {
         return readouts
     }
 
-    /// The printed number is a chakra price only for a Support card or for a
-    /// jutsu play, so it is labelled as whichever of those the card can do. A
-    /// body that can only be summoned gets no pill at all — summoning is free.
+    /// The printed number is a chakra price only for a jutsu play, or for
+    /// flipping the card face-up off its SUPPORT bar. A body that can do
+    /// neither gets no pill at all — summoning is free.
     private func chakraReadout(for card: Card) -> (label: String, value: String)? {
-        if card.type.costsChakraToPlay, let cost = card.cost {
-            return ("Cost", "\(cost)")
-        }
         if let jutsu = card.jutsuCost {
             return ("Jutsu", "\(jutsu)")
+        }
+        if let flip = card.supportFlipCost {
+            return ("Support", "\(flip)")
         }
         return nil
     }
@@ -306,16 +306,14 @@ struct CardDetailView: View {
     /// What the card costs to put into play.
     ///
     /// This deliberately never presents a Character's printed number as a
-    /// summoning price. Summoning is free; the printed cost is what the card
-    /// costs played as a jutsu, or played as a Support card.
+    /// summoning price. Summoning is free, and so is setting the card face-down
+    /// as a Support; the printed cost is what its jutsu charges, and what
+    /// flipping it face-up to answer charges.
     @ViewBuilder
     private func costPanel(_ card: Card) -> some View {
         switch card.type {
         case .leader, .chakra:
             EmptyView()
-
-        case .support:
-            textPanel(heading: "Cost", body: supportCostDescription(card))
 
         case .character, .exCharacter:
             textPanel(heading: "Cost", body: summonCostDescription(card))
@@ -337,25 +335,32 @@ struct CardDetailView: View {
         var lines: [String] = []
         if card.cannotBeSummonedNormally {
             lines.append("""
-            Summon: not available — this card prints "Cannot be summoned \
-            normally", so it can never be played from hand for its cost. It \
-            reaches the board only through the Summon Requirements printed \
-            alongside.
+            Summon: pay the Summon Requirements printed alongside. This card \
+            never spends your one normal summon for the turn — the requirement \
+            is the only door in.
             """)
         } else {
-            lines.append("Summon: free — putting a body on the board costs no chakra.")
+            lines.append("""
+            Summon: free — but only once a turn. After it, every other card is \
+            refused with "Summon already used this turn".
+            """)
+        }
+        if card.canSetAsSupport {
+            lines.append(supportCostDescription(card))
         }
         if let jutsu = card.jutsuCost {
             lines.append("As a jutsu: \(chakraPhrase(jutsu)), then it goes to the Trash.")
         }
-        return lines.joined(separator: "\n")
+        return lines.joined(separator: "\n\n")
     }
 
-    /// Wording for the one card type that is genuinely bought with chakra.
+    /// Wording for the SUPPORT bar: setting is free, and the printed chakra is
+    /// what turning the card face-up again to answer costs.
     private func supportCostDescription(_ card: Card) -> String {
         """
-        Play: \(chakraPhrase(card.cost ?? 0)). It fills one of your \
-        \(GameRules.supportSlots) Support slots and stays there.
+        Set as support: free. It lies face-down in one of your \
+        \(GameRules.supportSlots) Support slots until you flip it to answer, \
+        which costs \(chakraPhrase(card.supportFlipCost ?? 0)).
         """
     }
 

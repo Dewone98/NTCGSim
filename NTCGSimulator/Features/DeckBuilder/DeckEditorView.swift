@@ -33,6 +33,15 @@ struct DeckEditorView: View {
     @State private var searchText = ""
     @State private var costFilter: Int?
 
+    /// Narrows the pool to the cards printing a SUPPORT bar.
+    ///
+    /// They are the only cards that can be set face-down, and so the only cards
+    /// a deck can ever answer a response window with. A builder deciding how many
+    /// answers to carry needs to see them together, which the type sections alone
+    /// do not give — a SUPPORT bar is printed across Characters, not on a type of
+    /// its own.
+    @State private var supportBarOnly = false
+
     /// A Leader waiting on the "this removes off-colour cards" confirmation.
     @State private var leaderPendingChange: Card?
 
@@ -228,17 +237,21 @@ struct DeckEditorView: View {
             }
 
             PoolSearchField(text: $searchText)
-            costFilterRow
+            poolFilters
 
             if sections.isEmpty {
                 EmptyStatePanel(
                     headline: "Nothing matches",
-                    message: "Clear the search or the chakra cost filter to see the rest of the Leader's colour."
+                    message: "Clear the search or the filters to see the rest of the Leader's colour."
                 )
             } else {
                 LazyVStack(alignment: .leading, spacing: Metrics.spacingS) {
                     ForEach(sections) { section in
-                        PoolSectionHeader(type: section.type, count: section.cards.count)
+                        PoolSectionHeader(
+                            type: section.type,
+                            count: section.cards.count,
+                            settableCount: section.cards.filter(\.canSetAsSupport).count
+                        )
 
                         ForEach(section.cards) { card in
                             PoolCardRow(
@@ -255,28 +268,57 @@ struct DeckEditorView: View {
         }
     }
 
-    /// Filtering by cost now means filtering by what a card can actually be
-    /// played for, since summoning costs nothing at all.
-    private var costFilterRow: some View {
+    /// The two ways of narrowing the pool, with the one sentence that explains
+    /// both: what a printed chakra number is actually the price of, and why a
+    /// deck wants cards carrying a SUPPORT bar in it.
+    private var poolFilters: some View {
         VStack(alignment: .leading, spacing: Metrics.spacingS) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: Metrics.spacingS) {
-                    FilterChip(title: "Any chakra cost", isOn: costFilter == nil) {
-                        costFilter = nil
-                    }
-                    ForEach(availableCosts, id: \.self) { cost in
-                        FilterChip(title: "\(cost) chakra", isOn: costFilter == cost) {
-                            costFilter = costFilter == cost ? nil : cost
-                        }
-                    }
-                }
-                .padding(.vertical, 2)
-            }
+            costFilterRow
+            supportFilterRow
 
-            Text("Chakra only pays for Support cards and for jutsu played off a Support line. Summoning a Character is free.")
+            Text("Chakra is only ever spent flipping a face-down Support face-up, or "
+                 + "playing a card as a jutsu off the same line. Summoning a Character "
+                 + "and setting a card face-down are both free.")
                 .font(Typeface.body(12))
                 .foregroundStyle(Palette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Filtering by cost now means filtering by what a card can actually be
+    /// played for, since summoning costs nothing at all.
+    private var costFilterRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: Metrics.spacingS) {
+                FilterChip(title: "Any chakra cost", isOn: costFilter == nil) {
+                    costFilter = nil
+                }
+                ForEach(availableCosts, id: \.self) { cost in
+                    FilterChip(title: "\(cost) chakra", isOn: costFilter == cost) {
+                        costFilter = costFilter == cost ? nil : cost
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    /// Support is a mode a card is used in, not a type it is printed as, so it
+    /// cannot be reached through the type sections — the bar is printed across
+    /// Characters. This is the only way to see the answers a deck could carry
+    /// gathered together.
+    private var supportFilterRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: Metrics.spacingS) {
+                FilterChip(title: "Any card", isOn: !supportBarOnly) {
+                    supportBarOnly = false
+                }
+                FilterChip(title: "Prints a support bar", isOn: supportBarOnly) {
+                    supportBarOnly = true
+                }
+                .accessibilityHint("Shows only the cards that can be set face-down to answer with")
+            }
+            .padding(.vertical, 2)
         }
     }
 
@@ -311,11 +353,11 @@ struct DeckEditorView: View {
             Spacer(minLength: Metrics.spacingS)
 
             VStack(alignment: .trailing, spacing: Metrics.spacingXS) {
-                Text(supportTitle)
+                Text(supportBarTitle)
                     .font(Typeface.label(10))
                     .tracking(1)
                     .textCase(.uppercase)
-                    .foregroundStyle(supportCount == 0 ? Palette.warning : Palette.textSecondary)
+                    .foregroundStyle(supportBarCount == 0 ? Palette.warning : Palette.textSecondary)
 
                 Text("Max \(DeckRules.maxCopies) per card")
                     .font(Typeface.label(10))
@@ -328,15 +370,18 @@ struct DeckEditorView: View {
         .accessibilityLabel(countAccessibilityLabel)
     }
 
-    private var supportTitle: String {
-        supportCount == 0 ? "No support" : "\(supportCount) support"
+    /// Counts the bar, not a card type. "12 support" used to mean twelve cards
+    /// typed Support; it now means twelve cards printing the bar, and the
+    /// wording says so rather than leaving the old reading standing.
+    private var supportBarTitle: String {
+        supportBarCount == 0 ? "No support bars" : "\(supportBarCount) support bars"
     }
 
     private var countAccessibilityLabel: String {
-        let support = supportCount == 0
-            ? "no Support cards, so there is nothing to spend chakra on"
-            : "\(supportCount) Support cards"
-        return "\(deck.count) of \(DeckRules.requiredSize) cards, \(support), maximum \(DeckRules.maxCopies) copies per card"
+        let answers = supportBarCount == 0
+            ? "no cards printing a SUPPORT bar, so this deck can never answer a response window"
+            : "\(supportBarCount) cards printing a SUPPORT bar to answer with"
+        return "\(deck.count) of \(DeckRules.requiredSize) cards, \(answers), maximum \(DeckRules.maxCopies) copies per card"
     }
 
     // MARK: Loading and saving
@@ -436,10 +481,14 @@ struct DeckEditorView: View {
         deck.count == DeckRules.requiredSize ? Palette.positive : Palette.warning
     }
 
-    /// Support cards already in the deck. Chakra can only be spent on Support
-    /// cards and on jutsu, so a deck without any has nothing to spend it on.
-    private var supportCount: Int {
-        deck.cardIDs.reduce(0) { $0 + (database.card(id: $1)?.type == .support ? 1 : 0) }
+    /// Cards already in the deck that print a SUPPORT bar.
+    ///
+    /// They are the deck's only answers: a card can only be set face-down if it
+    /// prints the bar, and a face-down card is the only thing a response window
+    /// can be answered with. A deck holding none of them also has nothing to
+    /// spend chakra on, since flipping one is where chakra goes.
+    private var supportBarCount: Int {
+        deck.cardIDs.reduce(0) { $0 + (database.card(id: $1)?.canSetAsSupport == true ? 1 : 0) }
     }
 
     /// Everything the current Leader can legally play, before search and filter.
@@ -457,11 +506,11 @@ struct DeckEditorView: View {
         }
     }
 
-    /// What a card can actually be played for. Summoning is free, so a body
-    /// only has a price when it can go out as a jutsu instead; a Support card
-    /// always costs the number printed on it.
+    /// What a card can actually be played for. Summoning is free and so is
+    /// setting a card face-down, so the printed number is the price of its
+    /// jutsu — and, on the same card, of flipping it face-up to answer.
     private func chakraCost(of card: Card) -> Int? {
-        card.type.costsChakraToPlay ? (card.cost ?? 0) : card.jutsuCost
+        card.jutsuCost ?? card.supportFlipCost
     }
 
     private var availableCosts: [Int] {
@@ -471,6 +520,7 @@ struct DeckEditorView: View {
     private var filteredPool: [Card] {
         let needle = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return basePool.filter { card in
+            if supportBarOnly, !card.canSetAsSupport { return false }
             if let costFilter, chakraCost(of: card) != costFilter { return false }
             guard !needle.isEmpty else { return true }
             return "\(card.name) \(card.id) \(card.effect)".lowercased().contains(needle)
@@ -530,11 +580,15 @@ private struct PoolSection: Identifiable {
     var id: String { type.rawValue }
 }
 
-/// The heading above a type's rows. Support is called out as the one type that
-/// spends chakra, since a deck with none of them can never spend any.
+/// The heading above a type's rows. Cards printing a SUPPORT bar are called
+/// out, since they are the only ones that can be set face-down to answer with —
+/// and a deck holding none of them can never spend a chakra.
 private struct PoolSectionHeader: View {
     let type: CardType
     let count: Int
+
+    /// How many of this type print a SUPPORT bar.
+    var settableCount: Int = 0
 
     var body: some View {
         HStack(spacing: Metrics.spacingS) {
@@ -546,8 +600,8 @@ private struct PoolSectionHeader: View {
 
             Spacer(minLength: 0)
 
-            if type.costsChakraToPlay {
-                Text("Costs chakra")
+            if settableCount > 0 {
+                Text("\(settableCount) with a support bar")
                     .font(Typeface.label(9))
                     .tracking(1)
                     .textCase(.uppercase)
@@ -556,7 +610,12 @@ private struct PoolSectionHeader: View {
         }
         .padding(.top, Metrics.spacingXS)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(type.title), \(count) cards")
+        .accessibilityLabel(label)
+    }
+
+    private var label: String {
+        guard settableCount > 0 else { return "\(type.title), \(count) cards" }
+        return "\(type.title), \(count) cards, \(settableCount) printing a support bar"
     }
 }
 
@@ -585,11 +644,12 @@ private struct PoolCardRow: View {
                     .font(Typeface.display(14, weight: .bold))
                     .foregroundStyle(Palette.textPrimary)
                     .lineLimit(1)
-                Text("\(card.id) · \(card.type.title)")
+                Text(kindLine)
                     .font(Typeface.label(9))
                     .tracking(1)
                     .textCase(.uppercase)
-                    .foregroundStyle(Palette.textSecondary)
+                    .foregroundStyle(card.canSetAsSupport ? Palette.accent : Palette.textSecondary)
+                    .lineLimit(1)
                 if !statText.isEmpty {
                     Text(statText)
                         .font(Typeface.numeric(11, weight: .bold))
@@ -611,14 +671,22 @@ private struct PoolCardRow: View {
         )
     }
 
+    /// Number, type, and the SUPPORT bar where the card prints one.
+    ///
+    /// The bar is the only thing about a card that decides whether the deck can
+    /// answer with it, and it is not a type — it is printed across Characters —
+    /// so it has to be said here or a builder scanning the list cannot see it.
+    private var kindLine: String {
+        let kind = "\(card.id) · \(card.type.title)"
+        return card.canSetAsSupport ? "\(kind) · Support bar" : kind
+    }
+
     /// The values worth scanning down a list. A printed number is only shown as
-    /// a price where it is one — a Support card, or a jutsu play — because a
-    /// Character costs nothing to summon.
+    /// a price where it is one — a jutsu played from hand, or the same number
+    /// paid to flip the card face-up — because a Character costs nothing to
+    /// summon and nothing to set face-down.
     private var statText: String {
         var parts: [String] = []
-        if card.type.costsChakraToPlay, let cost = card.cost {
-            parts.append("\(cost) chakra")
-        }
         if let power  = card.power  { parts.append("\(power) PWR") }
         if let damage = card.damage { parts.append("\(damage) DMG") }
         if let health = card.health { parts.append("\(health) HP") }

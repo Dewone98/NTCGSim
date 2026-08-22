@@ -51,7 +51,12 @@ struct ClassicDeckChoiceView: View {
     // MARK: Panels
 
     private func deckPanel(for color: CardColor) -> some View {
-        Button {
+        // Resolved once and handed to both the pill and the spoken label:
+        // building the fixed list is cheap, but doing it twice for the same
+        // panel would be careless.
+        let answers = answerCount(for: color)
+
+        return Button {
             start(with: color)
         } label: {
             HStack(alignment: .top, spacing: Metrics.spacingM) {
@@ -70,8 +75,11 @@ struct ClassicDeckChoiceView: View {
                         .foregroundStyle(Palette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    CountPill(label: "Cards", value: "\(GameFormat.classic.deckSize)")
-                        .padding(.top, Metrics.spacingXS)
+                    HStack(spacing: Metrics.spacingXS) {
+                        CountPill(label: "Cards", value: "\(GameFormat.classic.deckSize)")
+                        CountPill(label: "Answers", value: "\(answers)")
+                    }
+                    .padding(.top, Metrics.spacingXS)
                 }
 
                 Spacer(minLength: 0)
@@ -90,7 +98,15 @@ struct ClassicDeckChoiceView: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel("\(color.title) deck. \(subtitle(for: color))")
+        .accessibilityLabel(label(for: color, answers: answers))
+    }
+
+    private func label(for color: CardColor, answers: Int) -> String {
+        let answered = answers == 0
+            ? "no cards to answer a response window with"
+            : "\(answers) cards to answer a response window with"
+        return "\(color.title) deck. \(subtitle(for: color)) "
+             + "\(GameFormat.classic.deckSize) cards, \(answered)."
     }
 
     /// The Leader that fronts a box, or a card back if the pool has none in
@@ -131,6 +147,20 @@ struct ClassicDeckChoiceView: View {
             return "Led by \(leader.name)."
         }
         return "The fixed \(color.title.lowercased()) list."
+    }
+
+    /// Cards in the box that print a SUPPORT bar, and so can be set face-down to
+    /// answer a response window.
+    ///
+    /// The list is generated rather than saved, so it is resolved through the
+    /// same `GameSetup.generatedList` the game itself will use — asking the
+    /// screen to count a different list from the one that gets dealt would be
+    /// worse than not counting at all.
+    private func answerCount(for color: CardColor) -> Int {
+        GameSetup
+            .generatedList(color: color, size: GameFormat.classic.deckSize, database: database)
+            .cards
+            .reduce(0) { $0 + (database.card(id: $1)?.canSetAsSupport == true ? 1 : 0) }
     }
 
     // MARK: Routing

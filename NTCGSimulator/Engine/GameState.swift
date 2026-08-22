@@ -2,10 +2,10 @@
 //  GameState.swift
 //  NTCGSimulator
 //
-//  The board itself: both players' zones, whose turn it is, which phase that
-//  turn sits in, and whether the game has been decided. Everything here is a
-//  plain value type carrying its own random generator, so a whole game replays
-//  exactly from the seed it started with.
+//  The board itself: both players' zones, the turn machine, the chain, and any
+//  open prompt or window. Everything here is a plain value type carrying its
+//  own random generator, so a whole game replays exactly from the seed it
+//  started with. Only `GameEngine` mutates it; the UI reads it.
 //
 
 import Foundation
@@ -35,38 +35,44 @@ enum PlayerSlot: String, Codable, Hashable, CaseIterable, Identifiable {
     }
 }
 
-// MARK: - Phases
+// MARK: - Phases and steps
 
-/// The five steps of a turn, in order. `refresh` and `draw` resolve without
-/// player input, so a player normally only ever sees `main`, `attack` and `end`.
-enum GamePhase: String, Codable, Hashable, CaseIterable, Identifiable {
+/// The turn's phase. `refresh` and `draw` are transient — the engine sets and
+/// passes through them inside a single turn hand-off with nobody to ask — and
+/// the player only ever acts in `main`. The reference declares an `end` phase
+/// in its constants but never enters it, so it is deliberately absent here.
+enum GamePhase: String, Codable, Hashable {
+
+    /// The active player's cards stand and their per-turn counters reset.
     case refresh
-    case draw
-    case main
-    case attack
-    case end
 
-    var id: String { rawValue }
+    /// The turn's draw: one card on game turn 1, two on every later turn.
+    case draw
+
+    /// The playable turn: summon, set Supports, activate, attack, in any
+    /// order, until END TURN.
+    case main
 
     var title: String {
         switch self {
         case .refresh: return "Refresh"
         case .draw:    return "Draw"
         case .main:    return "Main"
-        case .attack:  return "Attack"
-        case .end:     return "End"
         }
     }
+}
 
-    /// The phase that follows within the same turn. `nil` after `end`, which is
-    /// where the turn passes to the other player instead.
-    var next: GamePhase? {
+/// Whether a response window is open. `counter` means somebody holds priority
+/// and may answer with a Support — after an attack declaration, a summon, or
+/// a support activation.
+enum GameStep: String, Codable, Hashable {
+    case normal
+    case counter
+
+    var title: String {
         switch self {
-        case .refresh: return .draw
-        case .draw:    return .main
-        case .main:    return .attack
-        case .attack:  return .end
-        case .end:     return nil
+        case .normal:  return "Main"
+        case .counter: return "Counter Step"
         }
     }
 }
@@ -76,44 +82,82 @@ enum GamePhase: String, Codable, Hashable, CaseIterable, Identifiable {
 /// Every fixed number the rules engine leans on. Kept together so a rules
 /// correction is a one-line edit rather than a hunt through the engine.
 enum GameRules {
+
     /// Cards drawn at the start of a game, and again after a mulligan.
     static let openingHandSize = 5
 
-    /// Chakra cards placed ready during setup.
+    /// Chakra cards placed face-up during setup.
     static let chakraCount = 5
 
-    /// Bodies allowed in the Characters row at one time.
+    /// Character slots printed on the mat. Display only: the row itself is
+    /// unbounded and simply grows past five when effects flood the board.
     static let maxCharacters = 5
 
-    /// EX Characters allowed in the Characters row at one time.
-    static let maxEXCharacters = 1
-
-    /// Fixed Support slots printed on the mat.
+    /// Fixed Support slots printed on the mat. This one is a real cap.
     static let supportSlots = 5
 
     /// Life used when a Leader card is missing from the pool, so a broken or
     /// partial import degrades into a playable game rather than a crash.
     static let defaultLeaderLife = 15
+
+    /// Normal summons a player may make in one turn. EX Characters are exempt
+    /// and pay their printed Summon Requirements instead, without limit.
+    static let normalSummonsPerTurn = 1
+
+    /// Cards the first player draws on game turn 1.
+    static let firstTurnDraw = 1
+
+    /// Cards drawn at the start of every other turn — the second player draws
+    /// two on their very first turn.
+    static let normalDraw = 2
+
+    /// The first game turn on which the Recovery action is available, so the
+    /// first player can never recover on the game's opening turn.
+    static let recoveryFromTurn = 2
+
+    /// Attacks each character may declare per turn.
+    static let attacksPerCharacter = 1
+
+    /// Attacks the Leader may declare per turn.
+    static let leaderAttacksPerTurn = 1
+
+    /// The only game turn on which attacking is barred. The second player may
+    /// attack — Leader included — on turn 2; the first player's own next
+    /// chance is turn 3.
+    static let noAttackOnTurn = 1
 }
 
 // MARK: - Cards in play
 
-/// A Chakra card in the Chakra row. Resting one is how costs are paid.
+/// A Chakra card in the Chakra row. Costs flip the first face-up ones
+/// face-down; only the Recovery action turns them face-up again.
 struct ChakraCard: Identifiable, Hashable, Codable {
     let id: UUID
     let cardID: String
-    var isRested: Bool = false
+    var isFaceUp: Bool = true
 }
 
-/// A card occupying a fixed zone — a Support slot or the Summon zone. It has no
-/// battle state of its own, only identity and the card it represents.
-struct PlacedCard: Identifiable, Hashable, Codable {
+/// A card sitting in a numbered Support slot. It lies face-down from the
+/// moment it is set until its owner activates it; while its activation waits
+/// on the chain it sits revealed, and it leaves the slot when the chain
+/// resolves it.
+struct PlacedSupport: Identifiable, Hashable, Codable {
+
     let id: UUID
     let cardID: String
+
+    /// True once the card has been activated — it is on the chain, or came in
+    /// from hand mid-window, and can no longer be activated again.
+    var isRevealed: Bool = false
 }
 
 /// A body in the Characters row: the card it was played from plus the battle
 /// state that only exists while it is on the board.
+///
+/// The turn-stamped fields expire by comparison against the global turn
+/// number rather than being wiped: a value stamped with the current turn lasts
+/// the rest of that turn, and a freeze stamped `turn + 1` bites through the
+/// opponent's next turn.
 struct CharacterInPlay: Identifiable, Hashable, Codable {
 
     let id: UUID
@@ -121,84 +165,121 @@ struct CharacterInPlay: Identifiable, Hashable, Codable {
     /// Collector number, resolved against `CardDatabase` for printed values.
     let cardID: String
 
-    /// Cached from the card so the state can enforce the one-EX-at-a-time rule
+    /// Cached from the card so target filters can exclude EX Characters
     /// without reaching for the database.
     let isEX: Bool
 
-    /// Power absorbed so far this turn. Cleared during end-of-turn cleanup.
-    var damageTaken: Int = 0
+    /// The global turn this body arrived on. Summoning sickness is simply
+    /// `summonedOnTurn == turn` without Rush.
+    var summonedOnTurn: Int
 
-    /// Rested characters cannot attack or block until the next refresh.
+    /// Rested characters cannot attack, and are the only characters an enemy
+    /// may attack.
     var isRested: Bool = false
 
-    /// Summoning sickness: cleared by the owner's next refresh.
-    var summonedThisTurn: Bool = true
+    /// Power absorbed so far. Wiped for both players at end of every turn, so
+    /// damage only matters inside the turn it was dealt.
+    var damage: Int = 0
 
-    /// Power added or removed until the end of the turn, from abilities and
-    /// other temporary effects. Cleared during end-of-turn cleanup.
+    /// Power added until end of turn. Applied after doubling, never doubled.
     var powerBonus: Int = 0
 
-    /// Damage added or removed until the end of the turn. The mirror of
-    /// `powerBonus` for the value a connecting attack takes off a Leader.
+    /// Damage added until end of turn — the stat a connecting attack takes
+    /// off a Leader.
     var damageBonus: Int = 0
 
-    /// Rush: the card may attack on the turn it arrived. Granted by abilities
-    /// and cleared with the rest of the turn's temporary modifiers.
-    var hasRush: Bool = false
+    /// Attacks declared this turn. Reset at the owner's turn start.
+    var attacksUsed: Int = 0
 
-    /// Announced by a `cannotAttackNextTurn` effect. The owner's next refresh
-    /// promotes it into `isBarredFromAttacking`, which is what actually bites —
-    /// a ban declared during one turn only takes hold on the next one.
-    var isBarredNextTurn: Bool = false
+    /// Frozen while `turn <= cannotAttackUntilTurn` — a freeze stamped during
+    /// the opponent's turn blocks the owner's whole next turn.
+    var cannotAttackUntilTurn: Int = 0
 
-    /// True while an attack ban is in force. Set at refresh from
-    /// `isBarredNextTurn`, and cleared by the refresh after that.
-    var isBarredFromAttacking: Bool = false
+    /// Temporary Rush while `rushUntilTurn >= turn`. Granted by Ino's boost;
+    /// works even on a character whose own effects are negated.
+    var rushUntilTurn: Int = 0
 
-    /// Health left before the character is sent to the Trash.
+    /// Whether this character's Activate: Main was used this turn.
+    var activatedThisTurn: Bool = false
+
+    /// Doubled power while `powerDoubledUntilTurn >= turn`: twice *printed*
+    /// power plus `powerBonus` — the bonus is not doubled.
+    var powerDoubledUntilTurn: Int = 0
+
+    /// Support immunity while `supportImmuneUntilTurn >= turn`, against the
+    /// player in `supportImmuneFrom`, and only while a support is resolving
+    /// or the chain is live.
+    var supportImmuneUntilTurn: Int = 0
+    var supportImmuneFrom: PlayerSlot?
+
+    /// Set on a body summoned "with its effects negated": no On Summon, no
+    /// When Attacking, no Activate: Main, no printed or conditional Rush —
+    /// stats intact, and temporary `rushUntilTurn` still works.
+    var effectsNegated: Bool = false
+
+    init(id: UUID, cardID: String, isEX: Bool, summonedOnTurn: Int, effectsNegated: Bool = false) {
+        self.id = id
+        self.cardID = cardID
+        self.isEX = isEX
+        self.summonedOnTurn = summonedOnTurn
+        self.effectsNegated = effectsNegated
+    }
+
+    // MARK: Derived stats
+
+    /// Power for combat purposes. While doubled: twice printed power plus the
+    /// bonus — the reference doubles the printed value only.
+    func effectivePower(of card: Card, turn: Int) -> Int {
+        let printed = card.power ?? 0
+        let base = powerDoubledUntilTurn >= turn ? printed * 2 : printed
+        return base + powerBonus
+    }
+
+    /// Damage stat: what a connecting attack takes off a Leader's life.
+    func damageStat(of card: Card) -> Int {
+        (card.damage ?? 0) + damageBonus
+    }
+
+    /// Health left before `GameEngine.checkDeaths` sends the body to the
+    /// Trash. K.O. happens at `damage >= printed health`.
     func remainingHealth(of card: Card) -> Int {
-        max(0, (card.health ?? 0) - damageTaken)
+        max(0, (card.health ?? 0) - damage)
     }
 
-    /// Power for combat purposes: what is printed, plus any temporary
-    /// modifier, never below zero.
-    func effectivePower(of card: Card) -> Int {
-        max(0, (card.power ?? 0) + powerBonus)
+    /// Whether the character may attack on `turn`, given its printed card.
+    /// Rush — temporary, printed, or conditional — is the only way past
+    /// summoning sickness, and printed Rush dies with negated effects.
+    func canAttack(card: Card, turn: Int) -> Bool {
+        guard !isRested else { return false }
+        guard attacksUsed < GameRules.attacksPerCharacter else { return false }
+        guard turn > cannotAttackUntilTurn else { return false }
+        guard summonedOnTurn == turn else { return true }
+        return hasRush(card: card, turn: turn)
     }
 
-    /// Damage for combat purposes: what is printed, plus any temporary
-    /// modifier, never below zero.
-    func effectiveDamage(of card: Card) -> Int {
-        max(0, (card.damage ?? 0) + damageBonus)
+    /// Whether Rush applies right now, from any of its three sources.
+    func hasRush(card: Card, turn: Int) -> Bool {
+        if rushUntilTurn >= turn { return true }
+        guard !effectsNegated else { return false }
+        for ability in card.abilities {
+            for effect in ability.effects {
+                switch effect {
+                case .rush:
+                    return true
+                case .conditionalRush(let minimum):
+                    if effectivePower(of: card, turn: turn) >= minimum { return true }
+                default:
+                    continue
+                }
+            }
+        }
+        return false
     }
-
-    /// Ready characters may block.
-    var isReady: Bool { !isRested }
-
-    /// A character may attack once per turn, never on the turn it arrived
-    /// unless it has Rush, and never while an ability is holding it back.
-    var canAttack: Bool {
-        guard !isRested, !isBarredFromAttacking else { return false }
-        return !summonedThisTurn || hasRush
-    }
-}
-
-// MARK: - Ability use
-
-/// One printed ability box on one card in play.
-///
-/// "Once Per Turn" is a property of the box, not of the player: two characters
-/// each carrying their own once-per-turn ability must both be usable in the
-/// same turn, and a card printing two boxes must be able to use each of them.
-/// Keying the used set this way is what makes that true.
-struct AbilityUse: Hashable, Codable {
-    let source: AbilitySource
-    let abilityIndex: Int
 }
 
 // MARK: - Player side
 
-/// One player's half of the board: every zone, plus their Leader's life.
+/// One player's half of the board: every zone, plus their Leader's state.
 struct PlayerSide: Codable, Hashable {
 
     let slot: PlayerSlot
@@ -212,62 +293,69 @@ struct PlayerSide: Codable, Hashable {
     /// Face-down draw pile, top card first.
     var deck: [String]
 
-    /// Cards held. `GameAction.playCard` addresses these by index.
+    /// Cards held. Actions address these by index.
     var hand: [String]
 
-    /// The five Chakra cards, ready or rested.
+    /// The five Chakra cards, face-up or face-down.
     var chakra: [ChakraCard]
 
-    /// Bodies in play, in the order they were summoned.
+    /// Bodies in play, in the order they were summoned. Unbounded: the mat
+    /// draws five slots, and the row simply grows past them.
     var characters: [CharacterInPlay] = []
 
-    /// Five fixed Support slots. Nothing in the implemented ruleset fills them
-    /// — jutsu resolve straight to the Trash — but the zone exists so a rules
-    /// correction can place continuous cards here without reshaping the board.
-    var support: [PlacedCard?] = Array(repeating: nil, count: GameRules.supportSlots)
-
-    /// The single Summon zone.
-    var summon: PlacedCard? = nil
+    /// Five numbered Support slots, each holding one face-down card. Setting
+    /// one is free and unlimited; the chakra is paid on activation.
+    var supports: [PlacedSupport?] = Array(repeating: nil, count: GameRules.supportSlots)
 
     /// Discard pile, most recently added last.
     var trash: [String] = []
 
-    /// Cards removed from the game entirely.
+    /// Cards removed from the game entirely. The reference initialises this
+    /// zone and never touches it — reserved for a future EX mechanic — so it
+    /// is modelled as an always-empty list the board can still draw.
     var exclusion: [String] = []
 
-    /// Whether this side's Leader is rested. Nothing in the implemented ruleset
-    /// asks a Leader to attack or block, so this is board state the abilities
-    /// that say "rest this card" need in order to mean anything, and the board
-    /// draws it.
-    var leaderIsRested: Bool = false
+    // MARK: Leader state
 
-    /// Every ability box this side has used this turn. Cleared at the start of
-    /// each of their turns, so "Once Per Turn" resets with the refresh.
-    var usedAbilities: Set<AbilityUse> = []
+    /// A rested Leader cannot attack and blocks the Recovery action.
+    var leaderRested: Bool = false
 
-    /// Whether this player used their one mulligan.
-    var hasMulliganed: Bool = false
+    /// Attacks the Leader has declared this turn.
+    var leaderAttacksUsed: Int = 0
 
-    /// Whether this player has taken their mulligan decision at all. Turn one
-    /// cannot begin until both sides have.
-    var mulliganResolved: Bool = false
+    /// The Leader is frozen while `turn <= leaderCannotAttackUntilTurn` —
+    /// only Itachi's On Summon can stamp this.
+    var leaderCannotAttackUntilTurn: Int = 0
+
+    /// Whether the Leader's Activate: Main was used this turn. Only boxes
+    /// printing Once Per Turn actually check it.
+    var leaderUsedThisTurn: Bool = false
+
+    // MARK: Per-turn counters
+
+    /// The single physical Summon card: rested when the turn's one normal
+    /// summon is spent, standing again at the owner's next turn start.
+    /// Cosmetic — the real gate is `summonsUsedThisTurn`.
+    var summonRested: Bool = false
+
+    /// Normal summons taken this turn. EX summons do not count.
+    var summonsUsedThisTurn: Int = 0
+
+    /// Whether this player has settled their one mulligan. Only the player
+    /// going second ever gets the option.
+    var mulliganDone: Bool = false
+
+    /// The Recovery action is blocked while `turn < chakraLockedUntilTurn` —
+    /// the rider on the negate jutsu that costs you your next Recovery.
+    var chakraLockedUntilTurn: Int = 0
 
     // MARK: Derived
 
     /// Chakra still available to pay costs.
-    var readyChakra: Int { chakra.lazy.filter { !$0.isRested }.count }
+    var faceUpChakra: Int { chakra.lazy.filter(\.isFaceUp).count }
 
-    /// Chakra already spent this turn.
-    var restedChakra: Int { chakra.count - readyChakra }
-
-    /// The EX Character in play, if any.
-    var exCharacter: CharacterInPlay? { characters.first { $0.isEX } }
-
-    /// Characters able to block, or to be chosen as blockers.
-    var readyCharacters: [CharacterInPlay] { characters.filter(\.isReady) }
-
-    /// Characters able to declare an attack this turn.
-    var attackers: [CharacterInPlay] { characters.filter(\.canAttack) }
+    /// Chakra already spent.
+    var faceDownChakra: Int { chakra.count - faceUpChakra }
 
     func character(id: UUID) -> CharacterInPlay? {
         characters.first { $0.id == id }
@@ -277,83 +365,98 @@ struct PlayerSide: Codable, Hashable {
         characters.firstIndex { $0.id == id }
     }
 
-    /// Whether a particular ability box has already been used this turn.
-    func hasUsed(_ use: AbilityUse) -> Bool { usedAbilities.contains(use) }
+    /// Whether any Support slot is free.
+    var hasFreeSupportSlot: Bool { supports.contains { $0 == nil } }
+
+    /// The face-down, not-yet-activated cards in Support slots, with the slot
+    /// each occupies. These are what a response window is answered from.
+    var faceDownSupports: [(slotIndex: Int, placed: PlacedSupport)] {
+        supports.enumerated().compactMap { index, entry in
+            guard let entry, !entry.isRevealed else { return nil }
+            return (index, entry)
+        }
+    }
+
+    /// Whether any card at all — even a revealed one — sits in a Support
+    /// slot. The reference grants priority on exactly this test, so a player
+    /// holding nothing but a spent card still gets offered the window.
+    var hasAnySupportSet: Bool { supports.contains { $0 != nil } }
 
     // MARK: Mutation
 
-    /// Rests the first `count` ready Chakra. Deterministic order keeps replays
-    /// identical; which Chakra pays is otherwise immaterial.
-    mutating func restChakra(_ count: Int) {
-        var remaining = count
+    /// Flips the first `cost` face-up Chakra face-down. Deterministic order
+    /// keeps replays identical; which Chakra pays is otherwise immaterial.
+    /// - Returns: false when fewer than `cost` are face-up; nothing is paid.
+    @discardableResult
+    mutating func payChakra(_ cost: Int) -> Bool {
+        guard faceUpChakra >= cost else { return false }
+        var remaining = cost
         for index in chakra.indices where remaining > 0 {
-            guard !chakra[index].isRested else { continue }
-            chakra[index].isRested = true
+            guard chakra[index].isFaceUp else { continue }
+            chakra[index].isFaceUp = false
             remaining -= 1
         }
-    }
-
-    /// Turns every Chakra card face-up again, which several cards print as an
-    /// effect in its own right rather than only as part of the refresh step.
-    /// - Returns: how many were face-down, so the log can say what changed.
-    @discardableResult
-    mutating func readyAllChakra() -> Int {
-        let wasRested = restedChakra
-        for index in chakra.indices { chakra[index].isRested = false }
-        return wasRested
-    }
-
-    /// Marks an ability box used for the rest of this turn.
-    mutating func markUsed(_ use: AbilityUse) { usedAbilities.insert(use) }
-
-    /// Refresh step: stand everything up and clear summoning sickness.
-    mutating func readyAll() {
-        for index in chakra.indices { chakra[index].isRested = false }
-        for index in characters.indices {
-            characters[index].isRested = false
-            characters[index].summonedThisTurn = false
-            // A ban announced last turn is what bites now, and only for now.
-            characters[index].isBarredFromAttacking = characters[index].isBarredNextTurn
-            characters[index].isBarredNextTurn = false
-        }
-        leaderIsRested = false
-        usedAbilities.removeAll()
-    }
-
-    /// End-of-turn cleanup: temporary modifiers expire.
-    mutating func clearTemporaryModifiers() {
-        for index in characters.indices {
-            characters[index].powerBonus = 0
-            characters[index].damageBonus = 0
-            characters[index].hasRush = false
-        }
-    }
-
-    /// Places a card in the first free Support slot.
-    /// - Returns: `false` when every slot is occupied.
-    mutating func placeInSupport(_ placed: PlacedCard) -> Bool {
-        guard let free = support.firstIndex(where: { $0 == nil }) else { return false }
-        support[free] = placed
         return true
     }
 
-    /// Whether any Support slot is free.
-    var hasFreeSupportSlot: Bool { support.contains { $0 == nil } }
+    /// Turns every Chakra card face-up — the Recovery action's payoff.
+    /// - Returns: how many were face-down, so the log can say what changed.
+    @discardableResult
+    mutating func flipAllChakraFaceUp() -> Int {
+        let wasDown = faceDownChakra
+        for index in chakra.indices { chakra[index].isFaceUp = true }
+        return wasDown
+    }
+
+    /// Turn start for the active player: characters stand and per-turn
+    /// counters reset. Chakra is deliberately untouched — only the Recovery
+    /// action flips it face-up.
+    mutating func beginTurn() {
+        for index in characters.indices {
+            characters[index].isRested = false
+            characters[index].attacksUsed = 0
+            characters[index].activatedThisTurn = false
+        }
+        leaderRested = false
+        leaderAttacksUsed = 0
+        leaderUsedThisTurn = false
+        summonRested = false
+        summonsUsedThisTurn = 0
+    }
+
+    /// End-of-turn wipe, applied to BOTH players: battle damage heals and the
+    /// turn's stat bonuses expire. Turn-stamped fields expire by comparison
+    /// instead, so they are left alone.
+    mutating func wipeEndOfTurn() {
+        for index in characters.indices {
+            characters[index].damage = 0
+            characters[index].powerBonus = 0
+            characters[index].damageBonus = 0
+        }
+    }
+
+    /// Places a card face-down in the first free Support slot.
+    /// - Returns: the slot's number as the journal prints it — one-based — or
+    ///   `nil` when every slot is occupied.
+    mutating func setSupport(_ placed: PlacedSupport) -> Int? {
+        guard let free = supports.firstIndex(where: { $0 == nil }) else { return nil }
+        supports[free] = placed
+        return free + 1
+    }
+
+    /// Removes the placed card with `id` from whichever slot holds it.
+    /// - Returns: the card number that left the slot.
+    @discardableResult
+    mutating func removeSupport(id: UUID) -> String? {
+        guard let index = supports.firstIndex(where: { $0?.id == id }),
+              let placed = supports[index] else { return nil }
+        supports[index] = nil
+        return placed.cardID
+    }
 
     mutating func rest(characterID: UUID) {
         guard let index = indexOfCharacter(id: characterID) else { return }
         characters[index].isRested = true
-    }
-
-    mutating func applyDamage(_ amount: Int, to characterID: UUID) {
-        guard amount > 0, let index = indexOfCharacter(id: characterID) else { return }
-        characters[index].damageTaken += amount
-    }
-
-    /// Clears accumulated battle damage — characters heal during end-of-turn
-    /// cleanup, so damage only matters within the turn it was dealt.
-    mutating func healAllCharacters() {
-        for index in characters.indices { characters[index].damageTaken = 0 }
     }
 
     /// Removes a character from the row and puts its card in the Trash.
@@ -365,25 +468,49 @@ struct PlayerSide: Codable, Hashable {
         trash.append(removed.cardID)
         return removed.cardID
     }
+
+    /// Removes a character from the row and puts its card back in its
+    /// owner's hand, dropping all in-play state.
+    /// - Returns: the card number bounced, for the journal line.
+    @discardableResult
+    mutating func bounceCharacterToHand(id: UUID) -> String? {
+        guard let index = indexOfCharacter(id: id) else { return nil }
+        let removed = characters.remove(at: index)
+        hand.append(removed.cardID)
+        return removed.cardID
+    }
 }
 
 // MARK: - Pending attack
 
-/// An attack that has been declared and is waiting on the defender's block
-/// decision. Combat only resolves once this is answered.
+/// The card doing the attacking — the Leader attacks too, once per turn.
+enum AttackerReference: Hashable, Codable {
+    case leader
+    case character(UUID)
+
+    var characterID: UUID? {
+        if case .character(let id) = self { return id }
+        return nil
+    }
+}
+
+/// An attack that has been declared and is waiting on the defender's counter
+/// window. The attacker rested and spent its attack at declaration, and gets
+/// neither back even if the attack is interrupted.
 struct PendingAttack: Identifiable, Hashable, Codable {
     let id: UUID
-
-    /// The attacking character.
-    let attackerID: UUID
 
     /// The side that declared the attack.
     let attackingSlot: PlayerSlot
 
-    /// What the attack was aimed at before any block.
+    /// Who is swinging: the Leader, or a character by in-play identity.
+    let attacker: AttackerReference
+
+    /// What the attack was aimed at: the enemy Leader — always legal — or a
+    /// rested enemy character.
     let target: AttackTarget
 
-    /// The side that must answer with `GameAction.declareBlock`.
+    /// The side that holds priority in the counter window.
     var defendingSlot: PlayerSlot { attackingSlot.opposing }
 }
 
@@ -407,7 +534,7 @@ enum WinReason: String, Codable, Hashable, CaseIterable {
     var detail: String {
         switch self {
         case .lifeDepleted: return "a Leader ran out of life"
-        case .deckOut:      return "a player could not draw from an empty deck"
+        case .deckOut:      return "a deck ran out of cards"
         case .concession:   return "the other side conceded"
         }
     }
@@ -439,6 +566,64 @@ enum GameOutcome: Hashable, Codable {
     }
 }
 
+// MARK: - Turn state
+
+/// What the game is waiting for, as the player sees it. Derived rather than
+/// stored so it can never drift out of step with the board it describes.
+enum TurnState: Hashable {
+
+    /// The player going second is keeping or redrawing their opening hand.
+    case openingMulligan(PlayerSlot)
+
+    /// A prompt is open — a target pick, a hand pick, an EX payment — and
+    /// nothing else may happen until it is answered.
+    case choosing(PendingChoice)
+
+    /// A response window is open: the priority holder may activate a Support
+    /// or pass.
+    case awaitingResponse(ResponseWindow)
+
+    /// The undivided main phase. Summon, set Supports, activate, attack, in
+    /// any order, until END TURN.
+    case acting
+
+    /// The game has been decided.
+    case finished
+
+    /// Short label for the status bar.
+    var title: String {
+        switch self {
+        case .openingMulligan:  return "Refresh"
+        case .choosing:         return "Choose"
+        case .awaitingResponse: return "Counter Step"
+        case .acting:           return "Main"
+        case .finished:         return "Game over"
+        }
+    }
+
+    /// The sentence shown on the status strip.
+    var prompt: String {
+        switch self {
+        case .openingMulligan:
+            return "Keep this hand, or draw a new one"
+        case .choosing(let choice):
+            return choice.prompt
+        case .awaitingResponse(let window):
+            return window.prompt
+        case .acting:
+            return "Your turn, play a card or attack"
+        case .finished:
+            return "The game has finished"
+        }
+    }
+
+    /// The window, when one is open.
+    var responseWindow: ResponseWindow? {
+        if case .awaitingResponse(let window) = self { return window }
+        return nil
+    }
+}
+
 // MARK: - Game state
 
 /// The complete board. Only `GameEngine` should mutate this; the UI reads it.
@@ -447,22 +632,50 @@ struct GameState: Codable, Hashable {
     var player: PlayerSide
     var opponent: PlayerSide
 
-    /// Whose turn it is.
+    /// The active player — whose turn it is.
     var current: PlayerSlot
 
-    /// Who took the first turn — they skip their draw on turn one.
+    /// Who took the first turn, which sizes the opening draw.
     var firstPlayer: PlayerSlot
 
-    var phase: GamePhase = .refresh
+    /// The global turn counter, starting at 1: turn 1 is the first player's
+    /// first turn, turn 2 their opponent's, and so on. Every turn-stamped
+    /// duration on the board compares against this number.
+    var turnNumber: Int = 1
 
-    /// Counts player turns, not rounds: turn 1 is the first player's first turn,
-    /// turn 2 is their opponent's. Zero until both mulligans are answered.
-    var turnNumber: Int = 0
+    var phase: GamePhase = .refresh
+    var step: GameStep = .normal
+
+    /// Who may act in a counter step. Nil outside one.
+    var priority: PlayerSlot? = nil
+
+    /// Back-to-back passes: two in a row resolve the chain.
+    var consecutivePasses: Int = 0
+
+    /// The chain of activated Supports, top last. Resolves strictly LIFO once
+    /// both players stop responding.
+    var chain: [ChainLink] = []
+
+    /// The chain link currently mid-resolution, paused on a prompt.
+    var resolvingSupport: ResolvingSupport? = nil
+
+    /// Set between an attack declaration and its resolution.
+    var pendingAttack: PendingAttack? = nil
+
+    /// An open prompt. Blocks every action except answering it.
+    var pendingChoice: PendingChoice? = nil
+
+    /// Prompts raised while one was already open, answered in order.
+    var queuedChoices: [PendingChoice] = []
+
+    /// A summon window deferred until the summon's own prompts resolve.
+    var owedSummonWindow: PlayerSlot? = nil
+
+    /// The player going second, until they keep or redraw. The first player
+    /// never gets the option.
+    var awaitingMulligan: PlayerSlot? = nil
 
     var outcome: GameOutcome = .ongoing
-
-    /// Set between an attack declaration and the defender's block decision.
-    var pendingAttack: PendingAttack? = nil
 
     /// Carried in the state so every shuffle after setup stays reproducible.
     var rng: SeededGenerator
@@ -476,18 +689,33 @@ struct GameState: Codable, Hashable {
         }
     }
 
-    /// The side that would answer an attack right now.
-    var defender: PlayerSlot { current.opposing }
-
     var isFinished: Bool { outcome.isFinished }
 
-    /// True until both players have kept or redrawn their opening hand.
-    var isAwaitingMulligan: Bool {
-        !player.mulliganResolved || !opponent.mulliganResolved
+    /// Who the game is waiting on: the chooser, the mulliganing player, the
+    /// priority holder, or the active player — in that order of urgency.
+    var decider: PlayerSlot? {
+        guard !isFinished else { return nil }
+        if let pendingChoice { return pendingChoice.player }
+        if let awaitingMulligan { return awaitingMulligan }
+        if step == .counter { return priority }
+        return current
     }
 
-    func needsMulligan(_ slot: PlayerSlot) -> Bool {
-        !self[slot].mulliganResolved
+    /// What the game is waiting for, as the player sees it.
+    var turnState: TurnState {
+        if isFinished { return .finished }
+        if let awaitingMulligan { return .openingMulligan(awaitingMulligan) }
+        if let pendingChoice { return .choosing(pendingChoice) }
+        if let window = responseWindow { return .awaitingResponse(window) }
+        return .acting
+    }
+
+    /// Finds a character on either board, with the side that owns it.
+    func locateCharacter(id: UUID) -> (slot: PlayerSlot, character: CharacterInPlay)? {
+        for slot in PlayerSlot.allCases {
+            if let character = self[slot].character(id: id) { return (slot, character) }
+        }
+        return nil
     }
 
     /// Draws a reproducible identity for a new board entity.

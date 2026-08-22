@@ -38,7 +38,17 @@ struct CollectionView: View {
     @State private var trait: String?
     @State private var setCode: String?
 
-    /// The chip rows are hidden by default: five of them would push the grid
+    /// Narrows the grid to the cards printing a SUPPORT bar.
+    ///
+    /// Support used to be one of the type chips, back when the app modelled it
+    /// as a card type. It is a *mode*: a card carrying the bar may be set
+    /// face-down in a Support slot instead of being summoned, and the very same
+    /// card can still be summoned as a body. Twelve of the pool print one, they
+    /// are the only cards that can ever answer a response window, and losing the
+    /// type chip would otherwise have left no way to find them.
+    @State private var supportBarOnly = false
+
+    /// The chip rows are hidden by default: six of them would push the grid
     /// off the bottom of a phone before a single card was visible.
     @State private var isShowingFilters = false
 
@@ -201,6 +211,7 @@ struct CollectionView: View {
             setRow
             colorRow
             typeRow
+            supportRow
             rarityRow
             traitRow
         }
@@ -240,6 +251,22 @@ struct CollectionView: View {
                     withAnimation(.easeOut(duration: 0.15)) { types.toggle(type) }
                 }
             }
+        }
+    }
+
+    /// Support is a mode, not a type, so it sits in its own row rather than
+    /// among the type chips. The two chips are exclusive: a card either prints
+    /// the bar or it does not, and the pool is small enough that "everything
+    /// else" is better reached by simply clearing the filter.
+    private var supportRow: some View {
+        chipRow("Support") {
+            FilterChip(title: "Any card", isOn: !supportBarOnly) {
+                withAnimation(.easeOut(duration: 0.15)) { supportBarOnly = false }
+            }
+            FilterChip(title: "Prints a support bar", isOn: supportBarOnly) {
+                withAnimation(.easeOut(duration: 0.15)) { supportBarOnly = true }
+            }
+            .accessibilityHint("Shows only the cards that can be set face-down to answer with")
         }
     }
 
@@ -304,6 +331,7 @@ struct CollectionView: View {
             rarities: rarities,
             trait: trait,
             setCode: setCode,
+            supportBarOnly: supportBarOnly,
             poolRevision: database.poolRevision
         )
     }
@@ -353,8 +381,17 @@ struct CollectionView: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(card.name), \(card.id), \(card.type.title)")
+        .accessibilityLabel(label(for: card))
         .accessibilityHint("Opens the full card")
+    }
+
+    /// The bar is called out because it is not a value printed anywhere else on
+    /// the face a screen reader can reach, and it is what decides whether the
+    /// card can be set face-down to answer with.
+    private func label(for card: Card) -> String {
+        var parts = [card.name, card.id, card.type.title]
+        if card.canSetAsSupport { parts.append("prints a support bar") }
+        return parts.joined(separator: ", ")
     }
 
     // MARK: Filter state
@@ -366,6 +403,7 @@ struct CollectionView: View {
             + rarities.count
             + (trait == nil ? 0 : 1)
             + (setCode == nil ? 0 : 1)
+            + (supportBarOnly ? 1 : 0)
     }
 
     /// The Clear control also covers the search field, so it appears whenever
@@ -382,6 +420,7 @@ struct CollectionView: View {
             rarities.removeAll()
             trait = nil
             setCode = nil
+            supportBarOnly = false
         }
     }
 }
@@ -396,6 +435,7 @@ private struct FilterQuery: Equatable {
     var rarities: Set<Rarity>
     var trait: String?
     var setCode: String?
+    var supportBarOnly: Bool
     var poolRevision: Int
 }
 
@@ -413,7 +453,7 @@ private final class FilterResultsMemo {
     func results(for query: FilterQuery, in database: CardDatabase) -> [Card] {
         if lastQuery == query { return lastResults }
 
-        lastResults = database.filtered(
+        var matches = database.filtered(
             searchText: query.searchText,
             colors: query.colors,
             types: query.types,
@@ -421,6 +461,15 @@ private final class FilterResultsMemo {
             trait: query.trait,
             setCode: query.setCode
         )
+        // Applied here rather than in `CardDatabase`: the SUPPORT bar is a
+        // property of the printing, not one of the indexed columns the database
+        // filters on, and the pool is small enough that one more pass costs
+        // nothing behind the memo.
+        if query.supportBarOnly {
+            matches = matches.filter(\.canSetAsSupport)
+        }
+
+        lastResults = matches
         lastQuery = query
         return lastResults
     }

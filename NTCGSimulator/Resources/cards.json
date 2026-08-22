@@ -7,9 +7,7 @@
         },
         "effects": [
           {
-            "unimplemented": {
-              "_0": "negate that card"
-            }
+            "negateChainLink": {}
           },
           {
             "loseLife": {
@@ -24,17 +22,18 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "red",
     "cost": 1,
     "damage": 1,
-    "effect": "[Suport Activated] Negate that card. Then, reduce your life by 2.",
+    "effect": "[Support Activated] Negate that card. Then, reduce your life by 2.",
     "health": 4,
     "id": "K-039",
     "name": "Kakashi Hatake",
     "power": 7,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Lightning Blade — Support Activated: Negate that card. Then, reduce your life by 2.",
     "traits": [
       "Lightning",
       "Hidden Leaf Village",
@@ -58,16 +57,13 @@
       },
       {
         "cost": {
-          "trashMinimumPower": 10,
-          "trashOwnCharacters": 1
-        },
-        "effects": [
-          {
-            "unimplemented": {
-              "_0": "place 1 friendly character with 10 or more power in your trash"
+          "trashRequirements": [
+            {
+              "minimumPower": 10
             }
-          }
-        ],
+          ]
+        },
+        "effects": [],
         "oncePerTurn": false,
         "target": "friendlyCharacter",
         "text": "Place 1 of your Characters with 10 or more power in your trash.",
@@ -77,8 +73,12 @@
         "cost": {},
         "effects": [
           {
-            "unimplemented": {
-              "_0": "summon 1 non-EX [Naruto Uzumaki], [Jiraiya], or [Minato Namikaze] character from your trash"
+            "summonFromTrash": {
+              "names": [
+                "Naruto Uzumaki",
+                "Jiraiya",
+                "Minato Namikaze"
+              ]
             }
           }
         ],
@@ -89,6 +89,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "damage": 2,
     "effect": "Cannot be summoned normally.\n[Summon Requirements] Place 1 of your Characters with 10 or more power in your trash.\n[On Summon] Summon 1 non-EX [Naruto Uzumaki], [Jiraiya], or [Minato Namikaze] Character from your trash.",
@@ -108,8 +109,9 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
-    "effect": "",
+    "effect": "When using Chakra, turn this card face-down.",
     "id": "C-001",
     "name": "CHAKRA CARD",
     "rarity": "C",
@@ -120,8 +122,9 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
-    "effect": "",
+    "effect": "When using Chakra, turn this card face-down.",
     "id": "CP-001",
     "name": "CHAKRA CARD",
     "rarity": "C",
@@ -137,9 +140,8 @@
         },
         "effects": [
           {
-            "buffPower": {
-              "_0": 3,
-              "_1": "anyCharacter"
+            "boostChosenPower": {
+              "_0": 3
             }
           }
         ],
@@ -152,10 +154,7 @@
         "cost": {},
         "effects": [
           {
-            "restSelf": {}
-          },
-          {
-            "flipAllChakraFaceUp": {}
+            "recovery": {}
           }
         ],
         "oncePerTurn": false,
@@ -165,6 +164,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "damage": 1,
     "effect": "[Activate: Main] Flip 1 of your CHAKRA face-down and choose 1 Character: The chosen card gets +3 power during this turn.\n[Recovery] If it is the second turn or later, rest this card and flip all of your CHAKRA face-up.",
@@ -190,18 +190,17 @@
         },
         "effects": [
           {
-            "knockOut": {
-              "_0": "allCharacters"
-            }
+            "knockOutAll": {}
           }
         ],
         "oncePerTurn": false,
-        "target": "none",
+        "target": "allCharacters",
         "text": "K.O. all Characters.",
         "trigger": "duringYourMain"
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "red",
     "cost": 2,
     "damage": 1,
@@ -212,7 +211,7 @@
     "power": 5,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Rasengan — During Your Main: K.O. all Characters.",
     "traits": [
       "Special",
       "Jinchuriki",
@@ -229,13 +228,11 @@
         },
         "effects": [
           {
-            "unimplemented": {
-              "_0": "choose up to 2 rested characters"
-            }
-          },
-          {
-            "knockOut": {
-              "_0": "restedCharacter"
+            "knockOutChosen": {
+              "count": 2,
+              "nonEXOnly": false,
+              "restedOnly": true,
+              "upTo": true
             }
           }
         ],
@@ -246,6 +243,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "red",
     "cost": 2,
     "damage": 1,
@@ -256,7 +254,7 @@
     "power": 7,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Fire Style: Toad Flame Bombs — During Your Opponent's Attack: Choose up to 2 rested Characters: K.O. the chosen cards.",
     "traits": [
       "Fire",
       "The Legendary Sannin",
@@ -270,23 +268,19 @@
         "cost": {},
         "effects": [
           {
-            "grantRush": {
-              "_0": "selfCard"
-            }
-          },
-          {
-            "grantRush": {
-              "_0": "selfCard"
+            "conditionalRush": {
+              "minimumPower": 10
             }
           }
         ],
         "oncePerTurn": false,
-        "target": "none",
+        "target": "selfCard",
         "text": "If this Character has 10 or more power, this Character gains [Rush]. (This card can attack on the turn in which it is summoned.)",
         "trigger": "yourTurn"
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "damage": 2,
     "effect": "[Your Turn] If this Character has 10 or more power, this Character gains [Rush]. (This card can attack on the turn in which it is summoned.)",
@@ -312,14 +306,10 @@
         },
         "effects": [
           {
-            "unimplemented": {
-              "_0": "summon this card"
-            }
+            "interruptAttack": {}
           },
           {
-            "unimplemented": {
-              "_0": "interrupt that attack"
-            }
+            "summonSelf": {}
           }
         ],
         "oncePerTurn": false,
@@ -329,6 +319,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "red",
     "cost": 1,
     "damage": 1,
@@ -339,7 +330,7 @@
     "power": 6,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Shadow Possession Jutsu — During Your Opponent's Attack: Summon this card and interrupt that attack.",
     "traits": [
       "Special",
       "Hidden Leaf Village",
@@ -355,14 +346,12 @@
         },
         "effects": [
           {
-            "unimplemented": {
-              "_0": "summon this card"
-            }
-          },
-          {
             "gainLife": {
               "_0": 2
             }
+          },
+          {
+            "summonSelf": {}
           }
         ],
         "oncePerTurn": false,
@@ -372,6 +361,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "blue",
     "cost": 1,
     "damage": 1,
@@ -382,7 +372,7 @@
     "power": 4,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Hurry up and bite me! — During Your Opponent's Attack: Summon this card and you gain 2 Life.",
     "traits": [
       "Special",
       "The Taka"
@@ -395,35 +385,29 @@
         "cost": {},
         "effects": [
           {
-            "unimplemented": {
-              "_0": "check that you have [Shikamaru Nara] and [Choji Akimichi] on the field"
-            }
-          },
-          {
-            "unimplemented": {
-              "_0": "your [Ino Yamanaka], [Shikamaru Nara], and [Choji Akimichi] gain rush until end of turn"
-            }
-          },
-          {
-            "buffPower": {
-              "_0": 5,
-              "_1": "anyCharacter"
-            }
-          },
-          {
-            "buffDamage": {
-              "_0": 1,
-              "_1": "anyCharacter"
+            "teamBoost": {
+              "boosts": [
+                "Ino Yamanaka",
+                "Shikamaru Nara",
+                "Choji Akimichi"
+              ],
+              "damage": 1,
+              "power": 5,
+              "requires": [
+                "Shikamaru Nara",
+                "Choji Akimichi"
+              ]
             }
           }
         ],
         "oncePerTurn": true,
-        "target": "none",
+        "target": "ownTeam",
         "text": "If you have [Shikamaru Nara] and [Choji Akimichi] on the field, your [Ino Yamanaka], [Shikamaru Nara], and [Choji Akimichi] all gain Rush and +5 power/+1 damage during this turn. (This card can attack on the turn in which it is summoned.)",
         "trigger": "activateMain"
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "damage": 2,
     "effect": "[Activate: Main] If you have [Shikamaru Nara] and [Choji Akimichi] on the field, your [Ino Yamanaka], [Shikamaru Nara], and [Choji Akimichi] all gain Rush and +5 power/+1 damage during this turn. (This card can attack on the turn in which it is summoned.)",
@@ -465,15 +449,7 @@
         "cost": {},
         "effects": [
           {
-            "unimplemented": {
-              "_0": "check that it is the second turn or later"
-            }
-          },
-          {
-            "restSelf": {}
-          },
-          {
-            "flipAllChakraFaceUp": {}
+            "recovery": {}
           }
         ],
         "oncePerTurn": false,
@@ -483,6 +459,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "blue",
     "damage": 1,
     "effect": "[Activate: Main] Draw 1 card and place 1 card from your hand on top of your deck.\n[Recovery] If it is the second turn or later, rest this card and flip all of your CHAKRA face-up.",
@@ -506,18 +483,8 @@
         "cost": {},
         "effects": [
           {
-            "unimplemented": {
-              "_0": "choose 1 leader or character"
-            }
-          },
-          {
-            "unimplemented": {
-              "_0": "reveal top card of deck"
-            }
-          },
-          {
-            "cannotAttackNextTurn": {
-              "_0": "leaderOrCharacter"
+            "freezeChosenIfRevealTrait": {
+              "_0": "Uchiha Clan"
             }
           }
         ],
@@ -528,6 +495,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "blue",
     "damage": 2,
     "effect": "[On Summon] Choose 1 Leader or Character: Reveal the top card of your deck, and if the revealed card has the {Uchiha Clan} type, the selected card cannot attack during your opponent's next turn.",
@@ -561,21 +529,14 @@
       },
       {
         "cost": {
-          "trashOwnCharacters": 1,
-          "trashTrait": "The Taka"
+          "trashRequirements": [
+            {},
+            {
+              "trait": "The Taka"
+            }
+          ]
         },
-        "effects": [
-          {
-            "unimplemented": {
-              "_0": "place 1 of your characters in your trash"
-            }
-          },
-          {
-            "unimplemented": {
-              "_0": "place 1 of your {The Taka} type characters in your trash"
-            }
-          }
-        ],
+        "effects": [],
         "oncePerTurn": false,
         "target": "friendlyCharacter",
         "text": "Place 1 of your Characters and 1 of your {The Taka} type Characters in your trash.",
@@ -585,9 +546,7 @@
         "cost": {},
         "effects": [
           {
-            "unimplemented": {
-              "_0": "this card can attack on the turn in which it is summoned"
-            }
+            "rush": {}
           }
         ],
         "oncePerTurn": false,
@@ -599,13 +558,11 @@
         "cost": {},
         "effects": [
           {
-            "unimplemented": {
-              "_0": "choose 1 character"
-            }
-          },
-          {
-            "knockOut": {
-              "_0": "anyCharacter"
+            "knockOutChosen": {
+              "count": 1,
+              "nonEXOnly": false,
+              "restedOnly": false,
+              "upTo": false
             }
           }
         ],
@@ -616,6 +573,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "blue",
     "damage": 3,
     "effect": "Cannot be summoned normally.\n[Summon Requirements] Place 1 of your Characters and 1 of your {The Taka} type Characters in your trash.\n(This card can attack on the turn in which it is summoned.)\n[On Summon] Choose 1 Character: K.O. the chosen card.",
@@ -641,18 +599,17 @@
         },
         "effects": [
           {
-            "knockOut": {
-              "_0": "allCharacters"
-            }
+            "knockOutAll": {}
           }
         ],
         "oncePerTurn": false,
-        "target": "none",
+        "target": "allCharacters",
         "text": "K.O. all Characters.",
         "trigger": "duringYourMain"
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "blue",
     "cost": 2,
     "damage": 1,
@@ -663,7 +620,7 @@
     "power": 4,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Chidori: One Thousand Birds — During Your Main: K.O. all Characters.",
     "traits": [
       "Lightning",
       "Uchiha Clan"
@@ -678,12 +635,10 @@
         },
         "effects": [
           {
-            "unimplemented": {
-              "_0": "negate that card"
-            }
+            "negateChainLink": {}
           },
           {
-            "flipAllChakraFaceUp": {}
+            "chakraLock": {}
           }
         ],
         "oncePerTurn": false,
@@ -693,6 +648,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "blue",
     "cost": 1,
     "damage": 1,
@@ -703,7 +659,7 @@
     "power": 5,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Koto Amatsukami — Support Activated: Negate that card. Then, from this turn until the end of your next turn's End Phase, you cannot turn your CHAKRA face-up.",
     "traits": [
       "Illusion",
       "Uchiha Clan",
@@ -717,29 +673,30 @@
         "cost": {},
         "effects": [
           {
-            "unimplemented": {
-              "_0": "reveal top card of deck"
-            }
-          },
-          {
-            "unimplemented": {
-              "_0": "if revealed card is a \"Sasuke Uchiha, or The Taka\" type card other than an EX Character, summon that card"
+            "revealTopAndSummon": {
+              "names": [
+                "Sasuke Uchiha"
+              ],
+              "traits": [
+                "The Taka"
+              ]
             }
           }
         ],
         "oncePerTurn": false,
         "target": "none",
-        "text": "Reveal the top card of your deck, and if the revealed card is \"Sasuke Uchiha, or The Taka\" type card other than an EX Character/summon that card.",
+        "text": "Reveal the top card of your deck, and if the revealed card is a [Sasuke Uchiha] or {The Taka} type card other than an EX Character, summon that card.",
         "trigger": "whenAttacking"
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "blue",
     "damage": 2,
-    "effect": "[When Attacking] Reveal the top card of your deck, and if the revealed card is \"Sasuke Uchiha, or The Taka\" type card other than an EX Character/summon that card.",
+    "effect": "[When Attacking] Reveal the top card of your deck, and if the revealed card is a [Sasuke Uchiha] or {The Taka} type card other than an EX Character, summon that card.",
     "health": 7,
     "id": "N-019",
-    "name": "J\u016bgo",
+    "name": "Jūgo",
     "power": 9,
     "rarity": "C",
     "setCode": "01",
@@ -757,39 +714,31 @@
         },
         "effects": [
           {
-            "unimplemented": {
-              "_0": "choose 1 character"
-            }
+            "grantSupportImmunity": {}
           },
           {
-            "unimplemented": {
-              "_0": "summon this card"
-            }
-          },
-          {
-            "unimplemented": {
-              "_0": "chosen character is not affected by opponent's support effects this turn"
-            }
+            "summonSelf": {}
           }
         ],
         "oncePerTurn": false,
         "target": "anyCharacter",
         "text": "Choose 1 Character: Summon this card, and the chosen card will not be affected by your opponent's Support effects during this turn.",
-        "trigger": "passive"
+        "trigger": "quick"
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "blue",
     "cost": 1,
     "damage": 1,
-    "effect": "Choose 1 Character: Summon this card, and the chosen card will not be affected by your opponent's Support effects during this turn.",
+    "effect": "[Quick] Choose 1 Character: Summon this card, and the chosen card will not be affected by your opponent's Support effects during this turn.",
     "health": 5,
     "id": "N-021",
     "name": "Suigetsu Hozuki",
     "power": 5,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Water Transformation Jutsu — Quick: Choose 1 Character: Summon this card, and the chosen card will not be affected by your opponent's Support effects during this turn.",
     "traits": [
       "Water",
       "The Taka"
@@ -812,15 +761,11 @@
       },
       {
         "cost": {
-          "trashOwnCharacters": 1
+          "trashRequirements": [
+            {}
+          ]
         },
-        "effects": [
-          {
-            "unimplemented": {
-              "_0": "place 1 of your characters in your trash"
-            }
-          }
-        ],
+        "effects": [],
         "oncePerTurn": false,
         "target": "friendlyCharacter",
         "text": "Place 1 of your Characters in your trash.",
@@ -830,13 +775,9 @@
         "cost": {},
         "effects": [
           {
-            "unimplemented": {
-              "_0": "reveal top card of deck"
-            }
-          },
-          {
-            "unimplemented": {
-              "_0": "if revealed card is a non-EX character, summon it"
+            "revealTopAndSummon": {
+              "names": [],
+              "traits": []
             }
           }
         ],
@@ -847,6 +788,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "blue",
     "damage": 2,
     "effect": "Cannot be summoned normally.\n[Summon Requirements] Place 1 of your Characters in your trash.\n[On Summon] Reveal the top card of your deck, and if the revealed card is a non-EX Character, summon that card.",
@@ -865,19 +807,8 @@
   {
     "abilities": [
       {
-        "cost": {
-          "trashOwnCharacters": 1
-        },
-        "effects": [
-          {
-            "restSelf": {}
-          },
-          {
-            "unimplemented": {
-              "_0": "summon a character card"
-            }
-          }
-        ],
+        "cost": {},
+        "effects": [],
         "oncePerTurn": false,
         "target": "none",
         "text": "You may rest this card to summon a Character card.",
@@ -885,6 +816,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "effect": "You may rest this card to summon a Character card.",
     "id": "S-001",
@@ -902,39 +834,31 @@
         },
         "effects": [
           {
-            "unimplemented": {
-              "_0": "choose 1 character"
-            }
+            "doubleChosenPower": {}
           },
           {
-            "unimplemented": {
-              "_0": "summon this card"
-            }
-          },
-          {
-            "unimplemented": {
-              "_0": "double the chosen card's power until end of turn"
-            }
+            "summonSelf": {}
           }
         ],
         "oncePerTurn": false,
         "target": "anyCharacter",
-        "text": "[Quick] Choose 1 Character: Summon this card, and the chosen card's power is doubled during this turn.",
-        "trigger": "support"
+        "text": "Choose 1 Character: Summon this card, and the chosen card's power is doubled during this turn.",
+        "trigger": "quick"
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "red",
     "cost": 1,
     "damage": 1,
-    "effect": "[Support] [Quick] Choose 1 Character: Summon this card, and the chosen card's power is doubled during this turn.",
+    "effect": "[Quick] Choose 1 Character: Summon this card, and the chosen card's power is doubled during this turn.",
     "health": 3,
     "id": "SMP-01",
     "name": "Choji Akimichi",
     "power": 7,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Expansion Jutsu — Quick: Choose 1 Character: Summon this card, and the chosen card's power is doubled during this turn.",
     "traits": [
       "Taijutsu",
       "Hidden Leaf Village",
@@ -950,34 +874,33 @@
         },
         "effects": [
           {
-            "unimplemented": {
-              "_0": "choose 1 non-EX character"
-            }
-          },
-          {
-            "knockOut": {
-              "_0": "anyCharacter"
+            "knockOutChosen": {
+              "count": 1,
+              "nonEXOnly": true,
+              "restedOnly": false,
+              "upTo": false
             }
           }
         ],
         "oncePerTurn": false,
         "target": "anyCharacter",
-        "text": "[During Opponents Attack] Choose 1 non-EX Character: K.O. the chosen card.",
-        "trigger": "support"
+        "text": "Choose 1 non-EX Character: K.O. the chosen card.",
+        "trigger": "opponentsAttack"
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "red",
     "cost": 1,
     "damage": 1,
-    "effect": "[Support] [During Opponents Attack] Choose 1 non-EX Character: K.O. the chosen card.",
+    "effect": "[During Opponent's Attack] Choose 1 non-EX Character: K.O. the chosen card.",
     "health": 5,
     "id": "SMP-02",
     "name": "Hinata Hyuga",
     "power": 5,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "[8-TRIGRAM] Air Palm — During Opponent's Attack: Choose 1 non-EX Character: K.O. the chosen card.",
     "traits": [
       "Hyuga Clan",
       "Hidden Leaf Village",
@@ -1001,21 +924,14 @@
       },
       {
         "cost": {
-          "trashMinimumPower": 10,
-          "trashOwnCharacters": 1
+          "trashRequirements": [
+            {},
+            {
+              "minimumPower": 10
+            }
+          ]
         },
-        "effects": [
-          {
-            "unimplemented": {
-              "_0": "place 1 of your characters in your trash"
-            }
-          },
-          {
-            "unimplemented": {
-              "_0": "place 1 of your characters with 10 or more power in your trash"
-            }
-          }
-        ],
+        "effects": [],
         "oncePerTurn": false,
         "target": "friendlyCharacter",
         "text": "Place 1 of your Characters and 1 of your Characters with 10 or more power in your trash.",
@@ -1025,9 +941,7 @@
         "cost": {},
         "effects": [
           {
-            "unimplemented": {
-              "_0": "this card can attack on the turn in which it is played"
-            }
+            "rush": {}
           }
         ],
         "oncePerTurn": false,
@@ -1039,13 +953,8 @@
         "cost": {},
         "effects": [
           {
-            "unimplemented": {
-              "_0": "search your deck or trash for up to 1 [Naruto Uzumaki]"
-            }
-          },
-          {
-            "unimplemented": {
-              "_0": "summon it with its effects negated"
+            "searchSummonNegated": {
+              "name": "Naruto Uzumaki"
             }
           }
         ],
@@ -1056,6 +965,7 @@
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "damage": 3,
     "effect": "Cannot be summoned normally.\n[Summon Requirements] Place 1 of your Characters and 1 of your Characters with 10 or more power in your trash.\n(This card can attack on the turn in which it is played.)\n[On Summon] Summon up to 1 [Naruto Uzumaki] from your deck or trash with its effects negated.",
@@ -1081,44 +991,44 @@
         },
         "effects": [
           {
-            "unimplemented": {
-              "_0": "choose up to 2 rested characters"
-            }
-          },
-          {
-            "knockOut": {
-              "_0": "restedCharacter"
+            "knockOutChosen": {
+              "count": 2,
+              "nonEXOnly": false,
+              "restedOnly": true,
+              "upTo": true
             }
           }
         ],
         "oncePerTurn": false,
         "target": "restedCharacter",
-        "text": "[During Your Opponent's Attack] Choose up to 2 rested Characters: K.O. the chosen cards.",
-        "trigger": "support"
+        "text": "Choose up to 2 rested Characters: K.O. the chosen cards.",
+        "trigger": "opponentsAttack"
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "blue",
     "cost": 2,
     "damage": 1,
-    "effect": "[Support] [During Your Opponent's Attack] Choose up to 2 rested Characters: K.O. the chosen cards.",
+    "effect": "[During Your Opponent's Attack] Choose up to 2 rested Characters: K.O. the chosen cards.",
     "health": 7,
     "id": "SMP-04",
     "name": "Orochimaru",
     "power": 4,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Striking Shadow Snake — During Your Opponent's Attack: Choose up to 2 rested Characters: K.O. the chosen cards.",
     "traits": [
       "Special",
-      "Legendary Sanin",
-      "Hidden Sound Village"
+      "The Legendary Sannin",
+      "Village Hidden in the Sound"
     ],
     "type": "character"
   },
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "blue",
     "damage": 3,
     "effect": "",
@@ -1138,6 +1048,7 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "damage": 3,
     "effect": "",
@@ -1156,6 +1067,7 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "damage": 3,
     "effect": "",
@@ -1174,6 +1086,7 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "blue",
     "damage": 3,
     "effect": "",
@@ -1192,6 +1105,7 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "damage": 3,
     "effect": "",
@@ -1210,6 +1124,7 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "blue",
     "damage": 3,
     "effect": "",
@@ -1228,6 +1143,7 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "blue",
     "damage": 3,
     "effect": "",
@@ -1246,6 +1162,7 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "damage": 3,
     "effect": "",
@@ -1264,6 +1181,7 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "red",
     "damage": 3,
     "effect": "",
@@ -1282,6 +1200,7 @@
   {
     "abilities": [],
     "artist": "Bandai",
+    "canSetAsSupport": false,
     "color": "green",
     "damage": 3,
     "effect": "",
@@ -1305,34 +1224,28 @@
         },
         "effects": [
           {
-            "unimplemented": {
-              "_0": "choose 1 character"
-            }
-          },
-          {
-            "unimplemented": {
-              "_0": "return the chosen card to its owner's hand"
-            }
+            "returnChosenToHand": {}
           }
         ],
         "oncePerTurn": false,
-        "target": "opposingCharacter",
-        "text": "[During Your Opponent's Attack] Choose 1 Character: Return the chosen card to the owner's hand.",
-        "trigger": "support"
+        "target": "anyCharacter",
+        "text": "Choose 1 Character: Return the chosen card to the owner's hand.",
+        "trigger": "opponentsAttack"
       }
     ],
     "artist": "Bandai",
+    "canSetAsSupport": true,
     "color": "blue",
     "cost": 1,
     "damage": 1,
-    "effect": "[Support] [During Your Opponent's Attack] Choose 1 Character: Return the chosen card to the owner's hand.",
+    "effect": "[During Your Opponent's Attack] Choose 1 Character: Return the chosen card to the owner's hand.",
     "health": 4,
     "id": "SMP-15",
     "name": "Sakura Haruno",
     "power": 6,
     "rarity": "C",
     "setCode": "01",
-    "supportText": "Support: may be played as a jutsu instead of being summoned.",
+    "supportText": "Cha! — During Your Opponent's Attack: Choose 1 Character: Return the chosen card to the owner's hand.",
     "traits": [
       "Taijutsu",
       "Hidden Leaf Village",

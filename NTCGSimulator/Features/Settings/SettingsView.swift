@@ -183,11 +183,11 @@ struct SettingsView: View {
 
     private func jutsuSummonRow(isOn: Binding<Bool>) -> some View {
         SettingRow(
-            title: "Confirm before summoning a jutsu card",
-            explanation: "A card with a Support line can be summoned as a Character or played as a jutsu. This asks first, so a mistap does not spend it as a body. Off by default.",
+            title: "Always show the action panel",
+            explanation: "A card can be summoned, set face-down as a support, or played as its jutsu. This shows all three every time, even when only one is available, so a mistap never spends a card. Off by default.",
             placement: .trailing
         ) {
-            Toggle("Confirm before summoning a jutsu card", isOn: isOn)
+            Toggle("Always show the action panel", isOn: isOn)
                 .labelsHidden()
                 .tint(Palette.accent)
         }

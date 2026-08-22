@@ -245,9 +245,10 @@ struct CardFaceView: View {
                 }
             }
 
-            // A Support card is the one thing in hand that spends chakra, so it
-            // gets a spine no body ever has — legible even at board size.
-            if card.type == .support {
+            // A card printing a SUPPORT bar can be set face-down instead of
+            // being summoned, so it gets a spine a plain body never has —
+            // legible even at board size.
+            if card.canSetAsSupport {
                 HStack(spacing: 0) {
                     LinearGradient(
                         colors: [card.color.tint, Palette.accent],
@@ -275,7 +276,7 @@ struct CardFaceView: View {
                 namePlate
             }
         }
-        .padding(.leading, card.type == .support ? spineWidth : 0)
+        .padding(.leading, card.canSetAsSupport ? spineWidth : 0)
         .allowsHitTesting(false)
     }
 
@@ -426,15 +427,16 @@ struct CardFaceView: View {
         }
     }
 
-    /// The only chakra a card ever costs: a Support card's own price, or the
-    /// jutsu price on a card that prints a Support line. A body with neither is
-    /// summoned for free and prints no chakra at all.
+    /// The only chakra a card ever costs: the price of its jutsu, which is the
+    /// same number printed on the left of its SUPPORT bar and paid again when
+    /// the card is flipped face-up to answer. Summoning and setting are free, so
+    /// a card with neither prints no chakra at all.
     private var chakraCost: (amount: Int, isJutsu: Bool)? {
-        if card.type.costsChakraToPlay {
-            return (ChakraCost.toPlay(card, asJutsu: false), false)
-        }
         if let jutsu = card.jutsuCost {
             return (jutsu, true)
+        }
+        if let flip = card.supportFlipCost {
+            return (flip, false)
         }
         return nil
     }
@@ -471,14 +473,14 @@ struct CardFaceView: View {
         .background(namePlateBackground)
     }
 
-    /// The band behind the title. Support cards get a solid colour bar where a
-    /// body gets a neutral scrim, so the two never blur together in hand.
+    /// The band behind the title. A card carrying a SUPPORT bar gets a solid
+    /// colour bar where a plain body gets a neutral scrim, so the two never blur
+    /// together in hand.
     @ViewBuilder
     private var namePlateBackground: some View {
         let shape = NotchedRectangle(notch: size.plateNotch, corners: [.topTrailing])
 
-        switch card.type {
-        case .support:
+        if card.canSetAsSupport, card.type != .leader {
             shape.fill(
                 LinearGradient(
                     colors: [card.color.deepTint.opacity(0.96), card.color.deepTint.opacity(0.7)],
@@ -486,7 +488,7 @@ struct CardFaceView: View {
                     endPoint: .trailing
                 )
             )
-        case .leader:
+        } else if card.type == .leader {
             shape
                 .fill(
                     LinearGradient(
@@ -500,7 +502,7 @@ struct CardFaceView: View {
                         .fill(Palette.warning.opacity(0.8))
                         .frame(height: 1)
                 }
-        case .character, .exCharacter, .chakra, .summon:
+        } else {
             shape.fill(.black.opacity(0.52))
         }
     }
@@ -614,29 +616,29 @@ struct CardFaceView: View {
     }
 
     private var typeLineTint: Color {
+        if card.canSetAsSupport { return Palette.accent }
         switch card.type {
         case .leader:  return Palette.warning
-        case .support: return Palette.accent
         case .character, .exCharacter, .chakra, .summon: return .white.opacity(0.78)
         }
     }
 
     // MARK: Trim
 
-    /// Support cards are cut on all four corners, so the silhouette alone tells
-    /// them apart from a body at board size.
+    /// A card printing a SUPPORT bar is cut on all four corners, so the
+    /// silhouette alone tells it apart from a plain body at board size.
     private var notchCorners: NotchedCorners {
-        card.type == .support ? .all : .diagonal
+        card.canSetAsSupport ? .all : .diagonal
     }
 
     /// The colour the frame is trimmed in.
     private var frameAccent: Color {
         switch card.type {
         case .leader:      return Palette.warning
-        case .support:     return Palette.accent
         case .summon:      return Palette.positive
         case .chakra:      return Palette.textSecondary
-        case .character, .exCharacter: return card.color.tint
+        case .character, .exCharacter:
+            return card.canSetAsSupport ? Palette.accent : card.color.tint
         }
     }
 
@@ -666,17 +668,17 @@ struct CardFaceView: View {
         return parts.joined(separator: ", ")
     }
 
-    /// Worded for what the rules actually charge: only a Support card and a
-    /// jutsu play spend chakra, so a body is spoken as free to summon.
+    /// Worded for what the rules actually charge: summoning and setting are
+    /// free, and chakra is spent on a jutsu play or on flipping the card
+    /// face-up to answer.
     private var chakraDescription: String? {
         var phrases: [String] = []
-        if card.type.costsChakraToPlay {
-            phrases.append("costs \(ChakraCost.toPlay(card, asJutsu: false)) chakra")
-        } else if card.type.isBody {
-            phrases.append("free to summon")
-        }
+        if card.type.isBody { phrases.append("free to summon") }
         if let jutsu = card.jutsuCost {
             phrases.append("\(jutsu) chakra as a jutsu")
+        }
+        if card.canSetAsSupport {
+            phrases.append("free to set as a support")
         }
         return phrases.isEmpty ? nil : phrases.joined(separator: ", ")
     }
@@ -1195,16 +1197,21 @@ private enum ArtMotif {
     case crest      // Leaders
     case nova       // EX Characters
     case shuriken   // Characters
-    case scroll     // Support
+    case scroll     // Cards printing a SUPPORT bar
     case spiral     // Chakra
     case sigil      // Summons
 
-    init(_ type: CardType) {
-        switch type {
+    init(_ card: Card) {
+        // The SUPPORT bar wins over the type: it is the thing a player is
+        // looking for on the mat, and it is not a type any more.
+        if card.canSetAsSupport {
+            self = .scroll
+            return
+        }
+        switch card.type {
         case .leader:      self = .crest
         case .exCharacter: self = .nova
         case .character:   self = .shuriken
-        case .support:     self = .scroll
         case .chakra:      self = .spiral
         case .summon:      self = .sigil
         }
@@ -1273,7 +1280,7 @@ private struct ArtRecipe {
         var seed = CardSeed(card.id + "/" + card.name)
 
         self.detail = detail
-        motif = ArtMotif(card.type)
+        motif = ArtMotif(card)
         flourish = ArtFlourish(seed.int(0...3))
 
         // Every value below is drawn from the seed in the same order whatever
@@ -1683,7 +1690,7 @@ private func previewPool() -> [Card] {
                     cost: AbilityCost(chakra: 1),
                     target: .anyCharacter,
                     text: "Flip 1 of your CHAKRA face-down and choose 1 Character: The chosen card gets +3 power during this turn.",
-                    effects: [.buffPower(3, .anyCharacter)]
+                    effects: [.boostChosenPower(3)]
                 )
              ]),
         Card(id: "N-004", name: "Naruto Uzumaki", type: .character, color: .red,
@@ -1697,7 +1704,7 @@ private func previewPool() -> [Card] {
                     trigger: .duringYourMain,
                     cost: AbilityCost(chakra: 2),
                     text: "K.O. all Characters.",
-                    effects: [.knockOut(.allCharacters)]
+                    effects: [.knockOutAll]
                 )
              ]),
         Card(id: "N-030", name: "Sakura Haruno", type: .exCharacter, color: .blue,
@@ -1706,16 +1713,20 @@ private func previewPool() -> [Card] {
              cost: 3, power: 4, damage: 1, health: 5,
              effect: "Blocks for your Leader once per turn.",
              supportText: "Play as a jutsu: restore 2 life."),
-        Card(id: "SP-R03", name: "Nine-Tails Chakra", type: .support, color: .red,
+        Card(id: "SP-R03", name: "Nine-Tails Chakra", type: .character, color: .red,
              rarity: .superRare, setCode: "01",
              traits: ["Jinchuriki"],
-             cost: 4,
-             effect: "While this is in Support, your Characters have +2 power."),
-        Card(id: "SP-G01", name: "Byakugan Sight", type: .support, color: .green,
+             cost: 4, power: 6, damage: 1, health: 4,
+             effect: "[Support Activated] Your Characters have +2 power this turn.",
+             supportText: "Support: may be played as a jutsu instead of being summoned.",
+             canSetAsSupport: true),
+        Card(id: "SP-G01", name: "Byakugan Sight", type: .character, color: .green,
              rarity: .common, setCode: "01",
              traits: ["Hyuga Clan", "Special"],
-             cost: 2,
-             effect: "While this is in Support, your Characters have +1 power."),
+             cost: 2, power: 4, damage: 1, health: 5,
+             effect: "[Support Activated] Your Characters have +1 power this turn.",
+             supportText: "Support: may be played as a jutsu instead of being summoned.",
+             canSetAsSupport: true),
         Card(id: "C-001", name: "Chakra Card", type: .chakra, color: .blue,
              rarity: .common, setCode: "01",
              traits: ["Special"],
@@ -1758,7 +1769,7 @@ private func previewPool() -> [Card] {
     let pool = previewPool()
 
     HStack(spacing: Metrics.spacingM) {
-        ForEach(pool.filter { $0.type == .leader || $0.type == .support }) { card in
+        ForEach(pool.filter { $0.type == .leader || $0.canSetAsSupport }) { card in
             CardFaceView(card: card, size: .large)
                 .frame(width: 200)
         }

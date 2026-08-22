@@ -99,18 +99,32 @@ single `apply(_:)` entry point is the place to hook it.
 
 This is the rule most likely to be misread, so it is worth stating plainly:
 
-- **Summoning a Character or EX Character is free.** It costs no chakra.
+- **Summoning a Character or EX Character is free** — but you get **one normal summon a
+  turn**. Every other card is then refused with "Summon already used this turn". EX
+  Characters are exempt and pay their printed **Summon Requirements** instead.
+- **Setting a card face-down as a Support is free** and is not limited. Only the cards
+  printing a SUPPORT bar (`canSetAsSupport`) may be set.
 - **Chakra is spent on exactly two things:**
-  1. Playing a **Support card** (costs its printed value, occupies a Support slot).
-  2. Playing a card **as a jutsu** through its Support line (costs its printed value,
+  1. Playing a card **as a jutsu** through its Support line (costs its printed value,
      then goes to the Trash).
+  2. **Flipping a face-down Support** to answer a response window (costs the chakra
+     printed on the left of its SUPPORT bar).
 
-A card's printed cost is therefore a *jutsu/support* cost, never a summoning cost. The
-single source of truth is `ChakraCost.toPlay(_:asJutsu:)` in `Models/CardModels.swift` —
+A card's printed cost is therefore a *jutsu/support-bar* cost, never a summoning cost.
+The single source of truth is `ChakraCost.toPlay(_:mode:)` in `Models/CardModels.swift` —
 change it there and the whole app follows.
 
-**Leader abilities** activate once per turn during the main phase and are free. They are
-modelled as `LeaderAbility` and resolved by the engine.
+## The turn, and response windows
+
+**There are no phases.** A turn is a single undivided state prompting *"Your turn, play a
+card or attack"*, with END TURN as the only turn control; Recovery and Draw are steps the
+engine runs automatically before the turn opens. A player may summon, set Supports, play
+jutsu and attack in any order.
+
+After a summon resolves — and after an attack is declared — the moment passes to the
+other player: *"You may answer with a face-down card"*, with **PASS**. Their face-down
+Supports are the resource they answer with, and an answer that reads "Negate that card"
+cancels the summon or calls off the attack. See `Engine/ResponseWindow.swift`.
 
 ---
 

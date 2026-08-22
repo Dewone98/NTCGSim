@@ -8,7 +8,7 @@
 
 import SwiftUI
 
-/// How an unanswerable response window is handled.
+/// How a response window the player cannot answer is handled.
 enum AutoPassMode: String, Codable, CaseIterable {
     case holdWindow, passForMe
 
@@ -54,9 +54,10 @@ final class SettingsStore {
     var autoPass: AutoPassMode = .holdWindow          { didSet { save() } }
     var targetConfirm: TargetConfirmMode = .askMe     { didSet { save() } }
 
-    /// A card with a Support line can be summoned as a body or played as a
-    /// jutsu. When on, the app asks which — so a misplaced tap does not spend
-    /// the card as a body. Off by default, matching the simulator.
+    /// A card in hand has three modes: summon, set face-down as a Support, and
+    /// play its jutsu. When on, the app shows the action panel every time, even
+    /// where only one mode is available — so a misplaced tap never spends a
+    /// card. Off by default, matching the reference.
     var confirmJutsuSummon: Bool = false              { didSet { save() } }
 
     var endTurnConfirm: EndTurnConfirmMode = .askMe   { didSet { save() } }

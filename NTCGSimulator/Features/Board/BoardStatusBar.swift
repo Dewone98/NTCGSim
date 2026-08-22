@@ -3,8 +3,20 @@
 //  NTCGSimulator
 //
 //  The band that sits between the two halves of the board. It answers the three
-//  questions a player asks between taps: which phase the turn is in, what the
-//  game is waiting for, and whose decision it is.
+//  questions a player asks between taps: what the game is waiting for, whose
+//  decision it is, and how far into the game they are.
+//
+//  It used to draw a five-step phase track. The reference has no phases at all —
+//  the turn is one undivided state prompting "Your turn, play a card or attack",
+//  with END TURN as the only turn control — so there is no phase to report and no
+//  step for the player to advance. What the chip carries instead is the turn
+//  state: the opening mulligan, the turn itself, or a response window the other
+//  player owes an answer to.
+//
+//  The one thing in a turn that actually runs out is the single normal summon, so
+//  that is drawn as its own marker. "Summon already used this turn" is otherwise
+//  only discoverable by tapping a card and being refused, which is exactly the
+//  kind of silent rule this band exists to prevent.
 //
 
 import SwiftUI
@@ -18,20 +30,24 @@ import SwiftUI
 /// stays cheap to preview at both widths.
 struct BoardStatusBar: View {
 
-    /// The phase the current turn sits in.
-    let phase: GamePhase
+    /// What the game is waiting for.
+    let turnState: TurnState
 
     /// Player turns since the mulligan, not rounds. Zero before turn one.
     let turnNumber: Int
 
-    /// One sentence describing what the game is waiting for.
+    /// One sentence describing what the game is waiting for. Worded by the
+    /// board, which knows whose device this is and what it has armed.
     let prompt: String
 
     /// Display name of whoever is acting, already resolved for the play mode.
     let activePlayer: String
 
-    /// Compact drops the phase track and folds the journal into a button.
+    /// Compact folds the journal into a button and shortens every label.
     let isCompact: Bool
+
+    /// Whether the acting player has already taken the turn's one summon.
+    var hasSummoned: Bool = false
 
     /// Lines in the journal, shown on the compact button so the player can see
     /// the log has moved on without opening it.
@@ -40,9 +56,9 @@ struct BoardStatusBar: View {
     /// Present on compact only, where the journal has no room of its own.
     var onShowJournal: (() -> Void)? = nil
 
-    /// Present only while a Leader ability is waiting for a target. The band
-    /// sits between the two halves, so the way out of a targeting mode is
-    /// always next to the sentence explaining it.
+    /// Present only while an ability, a jutsu or a face-down Support is waiting
+    /// for a target. The band sits between the two halves, so the way out of a
+    /// targeting mode is always next to the sentence explaining it.
     var onCancelTargeting: (() -> Void)? = nil
 
     // MARK: Reserved heights
@@ -69,8 +85,9 @@ struct BoardStatusBar: View {
         HStack(spacing: Metrics.spacingS) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: Metrics.spacingXS) {
-                    phaseChip
+                    stateChip
                     turnLabel
+                    summonMarker
                     Spacer(minLength: 0)
                     playingLabel
                 }
@@ -91,13 +108,16 @@ struct BoardStatusBar: View {
     private var regularLayout: some View {
         VStack(alignment: .leading, spacing: Metrics.spacingS) {
             HStack(spacing: Metrics.spacingS) {
-                phaseChip
+                stateChip
                 turnLabel
                 Spacer(minLength: 0)
                 playingLabel
             }
 
-            phaseTrack
+            HStack(spacing: Metrics.spacingS) {
+                summonMarker
+                Spacer(minLength: 0)
+            }
 
             promptRow
 
@@ -109,16 +129,36 @@ struct BoardStatusBar: View {
 
     // MARK: Pieces
 
-    private var phaseChip: some View {
-        Text(phase.title)
+    private var stateChip: some View {
+        Text(chipTitle)
             .font(Typeface.display(isCompact ? 12 : 15, weight: .heavy))
             .tracking(1.6)
             .textCase(.uppercase)
             .foregroundStyle(Palette.textOnAccent)
+            .lineLimit(1)
+            // The top row carries four labels on a phone. Every one of them can
+            // give ground, so a long name — "Playing: The AI" beside a spent
+            // summon — shrinks the row rather than truncating one label to a
+            // word the player cannot read.
+            .minimumScaleFactor(0.7)
             .padding(.horizontal, Metrics.spacingS)
             .padding(.vertical, 3)
-            .notchedPanel(notch: 6, corners: .diagonal, fill: Palette.accent, stroke: .clear)
-            .accessibilityLabel("\(phase.title) phase")
+            .notchedPanel(notch: 6, corners: .diagonal, fill: chipTint, stroke: .clear)
+            .accessibilityLabel(chipTitle)
+    }
+
+    /// A window names what it is answering wherever there is room for it — the
+    /// difference between answering a summon and answering an attack decides
+    /// which face-down card is worth spending.
+    private var chipTitle: String {
+        guard !isCompact, let window = turnState.responseWindow else { return turnState.title }
+        return window.kind.title
+    }
+
+    /// A response window is somebody else's decision, so it is coloured apart
+    /// from the turn it interrupts.
+    private var chipTint: Color {
+        turnState.responseWindow == nil ? Palette.accent : Palette.negative
     }
 
     /// Turn zero means both opening hands are still being settled.
@@ -128,6 +168,9 @@ struct BoardStatusBar: View {
             .tracking(1.2)
             .textCase(.uppercase)
             .foregroundStyle(Palette.textSecondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .layoutPriority(-1)
     }
 
     private var playingLabel: some View {
@@ -160,7 +203,7 @@ struct BoardStatusBar: View {
             .accessibilityLabel(prompt)
     }
 
-    /// Backs out of a Leader ability that is waiting for a target.
+    /// Backs out of whatever is waiting for a target.
     private func cancelButton(_ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text("Cancel")
@@ -173,32 +216,46 @@ struct BoardStatusBar: View {
                 .notchedPanel(notch: 5, corners: .diagonal, fill: Palette.negative, stroke: .clear)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Cancel the Leader ability")
+        .accessibilityLabel("Cancel and choose again")
     }
 
-    /// The whole turn at a glance. Refresh and draw never wait for input, but
-    /// showing them keeps the sequence honest.
-    private var phaseTrack: some View {
-        HStack(spacing: Metrics.spacingXS) {
-            ForEach(GamePhase.allCases) { step in
-                Text(step.title)
-                    .font(Typeface.label(9))
-                    .tracking(1)
-                    .textCase(.uppercase)
-                    .foregroundStyle(step == phase ? Palette.textOnAccent : Palette.textSecondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .notchedPanel(
-                        notch: 5,
-                        corners: .diagonal,
-                        fill: step == phase ? Palette.accent : Palette.surface,
-                        stroke: step == phase ? .clear : Palette.border
-                    )
-            }
-            Spacer(minLength: 0)
+    /// The one thing in the turn that runs out. Everything else — setting
+    /// Supports, playing jutsu, attacking — is limited only by the cards, so
+    /// this is the only counter the band carries.
+    ///
+    /// The spent wording is the reference's own refusal, word for word, so a
+    /// player reads the same sentence here that a greyed SUMMON button gives
+    /// them.
+    @ViewBuilder
+    private var summonMarker: some View {
+        if turnNumber > 0 {
+            Text(summonText)
+                .font(Typeface.label(isCompact ? 8 : 9))
+                .tracking(1)
+                .textCase(.uppercase)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .foregroundStyle(hasSummoned ? Palette.textSecondary : Palette.textOnAccent)
+                .padding(.horizontal, isCompact ? 5 : 7)
+                .padding(.vertical, isCompact ? 2 : 4)
+                .notchedPanel(
+                    notch: 5,
+                    corners: .diagonal,
+                    fill: hasSummoned ? Palette.surface : Palette.accent,
+                    stroke: hasSummoned ? Palette.border : .clear
+                )
+                .accessibilityLabel(hasSummoned
+                                    ? "Summon already used this turn"
+                                    : "The turn's summon is still available")
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Turn sequence, currently the \(phase.title.lowercased()) phase")
+    }
+
+    /// The full refusal will not fit beside the turn number on a phone, so the
+    /// compact form keeps the state and drops the sentence — the action panel
+    /// still prints the whole of it against the button it refuses.
+    private var summonText: String {
+        if isCompact { return hasSummoned ? "Summon used" : "Summon ready" }
+        return hasSummoned ? "Summon already used this turn" : "Summon available"
     }
 
     private func journalButton(_ action: @escaping () -> Void) -> some View {
@@ -222,9 +279,9 @@ struct BoardStatusBar: View {
 
 #Preview("Compact") {
     BoardStatusBar(
-        phase: .main,
+        turnState: .acting,
         turnNumber: 3,
-        prompt: "Play cards from your hand, then move to the attack phase.",
+        prompt: "\(TurnState.acting.prompt).",
         activePlayer: "P1",
         isCompact: true,
         journalCount: 24,
@@ -234,15 +291,63 @@ struct BoardStatusBar: View {
     .background(Palette.backdrop)
 }
 
-#Preview("Regular") {
+#Preview("Compact, summon spent") {
     BoardStatusBar(
-        phase: .attack,
+        turnState: .acting,
+        turnNumber: 7,
+        prompt: "\(TurnState.acting.prompt).",
+        activePlayer: "The AI",
+        isCompact: true,
+        hasSummoned: true,
+        journalCount: 61,
+        onShowJournal: {}
+    )
+    .frame(width: 393 - Metrics.spacingS * 2)
+    .padding()
+    .background(Palette.backdrop)
+}
+
+#Preview("Regular, summon spent") {
+    BoardStatusBar(
+        turnState: .acting,
         turnNumber: 6,
-        prompt: "Choose a character to attack with, or end the phase.",
+        prompt: "\(TurnState.acting.prompt).",
         activePlayer: "Opponent",
-        isCompact: false
+        isCompact: false,
+        hasSummoned: true
     )
     .frame(height: BoardStatusBar.regularHeight)
+    .padding()
+    .background(Palette.backdrop)
+}
+
+#Preview("Answering a summon") {
+    let window = ResponseWindow(
+        kind: .summon,
+        respondingSlot: .opponent,
+        chainLength: 0
+    )
+
+    return VStack(spacing: Metrics.spacingM) {
+        BoardStatusBar(
+            turnState: .awaitingResponse(window),
+            turnNumber: 4,
+            prompt: "P2: \(window.prompt.lowercased()), or pass.",
+            activePlayer: "P1",
+            isCompact: true,
+            journalCount: 18,
+            onShowJournal: {}
+        )
+
+        BoardStatusBar(
+            turnState: .awaitingResponse(window),
+            turnNumber: 4,
+            prompt: "P2: \(window.prompt.lowercased()), or pass.",
+            activePlayer: "P1",
+            isCompact: false
+        )
+        .frame(height: BoardStatusBar.regularHeight)
+    }
     .padding()
     .background(Palette.backdrop)
 }
@@ -250,7 +355,7 @@ struct BoardStatusBar: View {
 #Preview("Choosing a target") {
     VStack(spacing: Metrics.spacingM) {
         BoardStatusBar(
-            phase: .main,
+            turnState: .acting,
             turnNumber: 4,
             prompt: "An opposing character loses 2 power: choose the character it acts on.",
             activePlayer: "P1",
@@ -261,7 +366,7 @@ struct BoardStatusBar: View {
         )
 
         BoardStatusBar(
-            phase: .main,
+            turnState: .acting,
             turnNumber: 4,
             prompt: "An opposing character loses 2 power: choose the character it acts on.",
             activePlayer: "P1",

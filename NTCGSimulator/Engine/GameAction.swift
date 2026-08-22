@@ -2,21 +2,24 @@
 //  GameAction.swift
 //  NTCGSimulator
 //
-//  Everything a player is allowed to attempt, and every reason the engine can
-//  turn an attempt down. The UI and the AI both speak to the engine in these
-//  terms — nothing else is allowed to touch the board.
+//  Everything a player is allowed to attempt — the reference engine's full
+//  input alphabet — and every reason the engine can turn an attempt down. The
+//  UI and the AI both speak to the engine in these terms; nothing else is
+//  allowed to touch the board.
 //
 
 import Foundation
 
 // MARK: - Attack target
 
-/// What an attack was declared against, before any block is announced.
+/// What an attack is declared against. The enemy Leader is always legal; an
+/// enemy character only while it is rested — there is no blocking and no
+/// taunt, so going face is always allowed.
 enum AttackTarget: Hashable, Codable {
     /// The defending Leader — the only target that costs life.
     case leader
 
-    /// A specific enemy character, addressed by its in-play identity.
+    /// A rested enemy character, addressed by its in-play identity.
     case character(UUID)
 
     /// The targeted character, when the attack was not aimed at the Leader.
@@ -34,41 +37,36 @@ enum AttackTarget: Hashable, Codable {
     }
 }
 
-// MARK: - Ability source
+// MARK: - Play mode
 
-/// Which card an activation is addressed to.
+/// The three things a card in hand can be used for.
 ///
-/// A side only ever has one Leader, so a Leader is named by its role rather
-/// than by an in-play identity it does not have. Everything else on the board
-/// that prints an ability is a body in the Characters row, addressed by the
-/// identity it was given when it arrived.
-enum AbilitySource: Hashable, Codable {
+/// Support is a *mode*, not a card type: a card printing a SUPPORT bar may be
+/// set face-down instead of being summoned, or — on your own turn only —
+/// activated straight from hand through a free slot. The same card can still
+/// be summoned as a body.
+enum CardPlayMode: String, Codable, Hashable, CaseIterable, Identifiable {
 
-    /// The activating player's own Leader.
-    case leader
+    /// Onto the Characters row. One normal summon per turn; EX Characters pay
+    /// their printed Summon Requirements instead, without limit.
+    case summon
 
-    /// A body in the activating player's Characters row.
-    case character(UUID)
+    /// Face-down into a numbered Support slot. Free, unlimited, and it opens
+    /// no response window.
+    case setAsSupport
 
-    /// The in-play identity, when the source is a body on the board.
-    var characterID: UUID? {
-        if case .character(let id) = self { return id }
-        return nil
-    }
+    /// Activate the card's Support line from hand: it transits through a free
+    /// slot, pays its chakra, and goes on the chain. Active player only.
+    case jutsu
 
-    /// Short label for confirmation prompts and the log.
+    var id: String { rawValue }
+
+    /// Label for the action panel.
     var title: String {
         switch self {
-        case .leader:    return "Leader"
-        case .character: return "Character"
-        }
-    }
-
-    /// Stable key used to build `GameAction.id`.
-    var key: String {
-        switch self {
-        case .leader:            return "leader"
-        case .character(let id): return id.uuidString
+        case .summon:       return "Summon"
+        case .setAsSupport: return "Set as support"
+        case .jutsu:        return "Activate support"
         }
     }
 }
@@ -79,50 +77,83 @@ enum AbilitySource: Hashable, Codable {
 /// reaches the board, and it validates before it mutates.
 enum GameAction: Hashable, Codable, Identifiable {
 
-    /// Answer the opening mulligan: `true` shuffles back and draws five new.
-    case mulligan(Bool)
+    /// Answer the opening mulligan — second player only. `keep: false` puts
+    /// the hand back, reshuffles the whole deck and draws five new.
+    case mulligan(keep: Bool)
 
-    /// Play the card at `handIndex`. `asJutsu` uses the card's support line and
-    /// sends it to the Trash instead of summoning it as a body.
-    case playCard(handIndex: Int, asJutsu: Bool)
+    /// Summon the card at `handIndex`: the turn's one normal summon for a
+    /// character, or the Summon Requirements path for an EX Character.
+    case summon(handIndex: Int)
 
-    /// Declare an attack with one of your ready characters.
-    case attack(attackerID: UUID, target: AttackTarget)
+    /// Set the card at `handIndex` face-down into the first free Support
+    /// slot. Free, uncapped, no window.
+    case setSupport(handIndex: Int)
 
-    /// Answer a declared attack. `nil` takes the attack unblocked.
-    case declareBlock(blockerID: UUID?)
+    /// Activate the face-down Support in `slotIndex`, paying its chakra and
+    /// pushing it onto the chain.
+    case activateSupport(slotIndex: Int)
 
-    /// Activate one printed ability box on a card you control.
-    ///
-    /// `abilityIndex` is the box's position in the card's printed order, so the
-    /// same card can offer several activations at once. `targetID` names the
-    /// card the ability acts on, when its scope asks the player to choose one.
-    case useAbility(source: AbilitySource, abilityIndex: Int, targetID: UUID?)
+    /// Activate a Support straight from hand — active player only; the card
+    /// transits through a free slot.
+    case activateSupportFromHand(handIndex: Int)
 
-    /// Move from main to attack, or from attack to end.
-    case endPhase
+    /// Use a character's printed Activate: Main — Ino's team boost.
+    case activateCharacter(UUID)
 
-    /// Finish the turn from any phase and pass to the other player.
+    /// Use the Leader's printed Activate: Main. Does not rest the Leader.
+    case leaderEffect
+
+    /// Rest the Leader and turn every chakra face-up. From game turn 2, on
+    /// your own turn, while the Leader stands and no chakra lock bites.
+    case recovery
+
+    /// Declare an attack with the Leader or one of your characters, at the
+    /// enemy Leader or a rested enemy character.
+    case declareAttack(attacker: AttackerReference, target: AttackTarget)
+
+    /// Decline to answer the open counter window. Two passes in a row — or
+    /// one against an empty chain — resolve it.
+    case passCounter
+
+    /// Answer the open prompt with the chosen option keys. Empty keys cancel
+    /// a cancellable prompt.
+    case resolveChoice(keys: [String])
+
+    /// Finish the turn and pass to the other player.
     case endTurn
 
-    /// Give the game to the other player.
+    /// Give the game to the other player. The reference engine has no concede
+    /// of its own — quitting lives outside its reducer — so this is the app's
+    /// offline stand-in. /// UNSURE how the reference reports an online concede.
     case concede
 
     /// Stable identity so lists of legal actions can be rendered directly.
     var id: String {
         switch self {
-        case .mulligan(let redraw):
-            return "mulligan-\(redraw)"
-        case .playCard(let index, let asJutsu):
-            return "play-\(index)-\(asJutsu)"
-        case .attack(let attacker, let target):
-            return "attack-\(attacker.uuidString)-\(target.characterID?.uuidString ?? "leader")"
-        case .declareBlock(let blocker):
-            return "block-\(blocker?.uuidString ?? "none")"
-        case .useAbility(let source, let index, let target):
-            return "ability-\(source.key)-\(index)-\(target?.uuidString ?? "none")"
-        case .endPhase:
-            return "end-phase"
+        case .mulligan(let keep):
+            return "mulligan-\(keep)"
+        case .summon(let index):
+            return "summon-\(index)"
+        case .setSupport(let index):
+            return "set-\(index)"
+        case .activateSupport(let slotIndex):
+            return "activate-slot-\(slotIndex)"
+        case .activateSupportFromHand(let index):
+            return "activate-hand-\(index)"
+        case .activateCharacter(let id):
+            return "activate-character-\(id.uuidString)"
+        case .leaderEffect:
+            return "leader-effect"
+        case .recovery:
+            return "recovery"
+        case .declareAttack(let attacker, let target):
+            let who = attacker.characterID?.uuidString ?? "leader"
+            let what = target.characterID?.uuidString ?? "leader"
+            return "attack-\(who)-\(what)"
+        case .passCounter:
+            return "pass"
+        case .resolveChoice(let keys):
+            return "choice-\(keys.joined(separator: ","))"
         case .endTurn:
             return "end-turn"
         case .concede:
@@ -130,22 +161,33 @@ enum GameAction: Hashable, Codable, Identifiable {
         }
     }
 
-    /// Short, user-readable label. The board decorates it with card names where
-    /// it has them; the engine deliberately knows nothing about card art.
+    /// Short, user-readable label. The board decorates it with card names
+    /// where it has them; the engine deliberately knows nothing about art.
     var title: String {
         switch self {
-        case .mulligan(let redraw):
-            return redraw ? "Take a mulligan" : "Keep this hand"
-        case .playCard(_, let asJutsu):
-            return asJutsu ? "Play as a jutsu" : "Play card"
-        case .attack(_, let target):
-            return target == .leader ? "Attack the Leader" : "Attack a character"
-        case .declareBlock(let blocker):
-            return blocker == nil ? "Take it on the Leader" : "Block"
-        case .useAbility(let source, _, _):
-            return source == .leader ? "Use Leader ability" : "Use character ability"
-        case .endPhase:
-            return "End phase"
+        case .mulligan(let keep):
+            return keep ? "Keep this hand" : "Take a mulligan"
+        case .summon:
+            return "Summon"
+        case .setSupport:
+            return "Set as support"
+        case .activateSupport(let slotIndex):
+            return "Activate support slot \(slotIndex + 1)"
+        case .activateSupportFromHand:
+            return "Activate support from hand"
+        case .activateCharacter:
+            return "Use character ability"
+        case .leaderEffect:
+            return "Use Leader ability"
+        case .recovery:
+            return "Recovery"
+        case .declareAttack(let attacker, let target):
+            let who = attacker == .leader ? "Leader attacks" : "Attack"
+            return target == .leader ? "\(who) the Leader" : "\(who) a character"
+        case .passCounter:
+            return "Pass"
+        case .resolveChoice(let keys):
+            return keys.isEmpty ? "Cancel" : "Choose"
         case .endTurn:
             return "End turn"
         case .concede:
@@ -156,23 +198,75 @@ enum GameAction: Hashable, Codable, Identifiable {
 
 // MARK: - Errors
 
-/// Every reason the engine rejects an action. Each case carries copy that is
-/// safe to show the player as-is.
+/// Every reason the engine rejects an action. The cases mirror the
+/// reference's own block codes — `timing`, `noChakra`, `noSlot`, `noTarget`,
+/// `alreadyUsed`, `conditionUnmet` for Supports; `tooEarly`, `rested`,
+/// `summoningSickness`, `noAttackLeft`, `frozen` for attacks; `chakraLocked`
+/// for Recovery — plus the engine-level guards around them. Each carries copy
+/// that is safe to show the player as-is.
 enum GameError: Error, Hashable, LocalizedError {
 
     /// The game has already been decided.
     case gameOver
 
-    /// It is the other player's turn.
+    /// It is the other player's turn, or their priority.
     case notYourTurn
 
-    /// The action is not available in the phase the turn is currently in.
-    case wrongPhase(GamePhase)
+    /// The action is not available at this moment — the reference's `timing`.
+    case wrongMoment
+
+    /// A prompt is open and must be answered first.
+    case choicePending
+
+    /// The open prompt belongs to the other player.
+    case notYourChoice
+
+    /// The answer names keys the prompt does not offer, repeats one, or
+    /// declines a prompt that cannot be declined.
+    case invalidChoice
+
+    /// Attacking and Recovery are barred this early — the reference's
+    /// `tooEarly`: no attacks on game turn 1, no Recovery before turn 2.
+    case tooEarly
+
+    /// The attacker or Leader is rested — `rested`.
+    case rested
+
+    /// The character arrived this turn and has no Rush — `summoningSickness`.
+    case summoningSickness
+
+    /// The attacker has already used its attack this turn — `noAttackLeft`.
+    case noAttackLeft
+
+    /// A freeze is holding the attacker back — `frozen`.
+    case frozen
+
+    /// A chakra lock is blocking Recovery — `chakraLocked`.
+    case chakraLocked
+
+    /// The one normal summon has already been taken this turn.
+    case summonAlreadyUsed
+
+    /// This Support has already been activated — `alreadyUsed`.
+    case alreadyUsed
+
+    /// The action needs a target and no legal one exists — `noTarget`.
+    case noValidTarget
+
+    /// Not enough face-up chakra to pay the cost — `noChakra`.
+    case noChakra(required: Int, available: Int)
+
+    /// No free Support slot for a from-hand activation — `noSlot`.
+    case noSlot
+
+    /// A printed condition is not met — `conditionUnmet`: Ino without her
+    /// team, a card with no Support half, an ability the card does not print.
+    case conditionUnmet
 
     /// Both opening hands must be settled before the first turn begins.
     case awaitingMulligan
 
-    /// The one mulligan has already been taken or declined.
+    /// The mulligan belongs to the second player, once.
     case mulliganUnavailable
 
     /// No card sits at that position in hand.
@@ -181,124 +275,79 @@ enum GameError: Error, Hashable, LocalizedError {
     /// The card number is not in the active pool.
     case unknownCard(String)
 
-    /// Not enough ready Chakra to pay the cost.
-    case notEnoughChakra(required: Int, available: Int)
-
-    /// The Characters row already holds the maximum number of bodies.
-    case charactersRowFull
-
-    /// Only one EX Character may be in play at a time.
-    case exCharacterAlreadyInPlay
-
-    /// The Summon zone already holds a card.
-    case summonZoneOccupied
-
-    /// Every Support slot is occupied.
-    case supportRowFull
-
     /// Leaders and Chakra cards are never played from hand.
     case notPlayableFromHand(String)
 
-    /// The card has no support line, so it cannot be played as a jutsu.
-    case noSupportLine(String)
-
-    /// The chosen attacker is rested, newly summoned, or not in play.
-    case attackerUnavailable
-
-    /// The chosen target is not on the defending board.
+    /// The chosen target is not on the board, or not legal for this attack.
     case invalidTarget
 
-    /// There is no declared attack to answer.
-    case noAttackPending
+    /// That Support slot holds no face-down card.
+    case supportSlotEmpty(Int)
 
-    /// An attack is waiting on a block decision and must be settled first.
-    case attackAlreadyPending
+    /// The card's printed Summon Requirements cannot be paid.
+    case summonRequirementUnpaid(String)
 
-    /// The chosen blocker is rested or not in play.
-    case blockerUnavailable
+    /// There is no counter window open, or it is not yours to pass.
+    case noCounterWindow
 
-    /// The card that would use the ability has left the board, or was never on
-    /// the activating player's side of it.
-    case abilitySourceNotInPlay
-
-    /// The card does not print an ability box at that position.
-    case noSuchAbility(String)
-
-    /// The ability resolves by itself — a passive rule, or a trigger the engine
-    /// fires — so there is nothing for the player to press.
-    case abilityNotActivated(String)
-
-    /// A "Once Per Turn" ability has already been used by this card this turn.
-    case abilityAlreadyUsed(String)
-
-    /// The cost asks for more of your own Characters than you have that can
-    /// legally pay it.
-    case notEnoughCharactersToTrash(required: Int, available: Int)
-
-    /// The card prints Summon Requirements, so it never reaches the board by
-    /// being summoned normally.
-    case cannotBeSummonedNormally(String)
-
-    /// The ability needs a target and none was supplied, or the one supplied
-    /// is not legal for the ability's scope.
-    case abilityNeedsTarget
-
-    /// Sentence shown to the player when their tap is refused.
+    /// Sentence shown to the player when their tap is refused. The first two
+    /// quoted lines are the reference's own disabled-button copy.
     var message: String {
         switch self {
         case .gameOver:
             return "This game has already finished."
         case .notYourTurn:
             return "It is not your turn."
-        case .wrongPhase(let phase):
-            return "You cannot do that during the \(phase.title.lowercased()) phase."
+        case .wrongMoment:
+            return "Wrong moment"
+        case .noValidTarget:
+            return "No valid target"
+        case .choicePending:
+            return "Answer the open prompt first."
+        case .notYourChoice:
+            return "That prompt is not yours to answer."
+        case .invalidChoice:
+            return "That is not one of the offered options."
+        case .tooEarly:
+            return "Not this early in the game."
+        case .rested:
+            return "That card is rested."
+        case .summoningSickness:
+            return "That character was summoned this turn and has no Rush."
+        case .noAttackLeft:
+            return "That card has already attacked this turn."
+        case .frozen:
+            return "That card cannot attack right now."
+        case .chakraLocked:
+            return "You cannot turn your chakra face-up right now."
+        case .summonAlreadyUsed:
+            return "Summon already used this turn"
+        case .alreadyUsed:
+            return "That has already been used."
+        case .noChakra(let required, let available):
+            return "That costs \(required) chakra and you have \(available) face-up."
+        case .noSlot:
+            return "No free Support slot."
+        case .conditionUnmet:
+            return "The card's condition is not met."
         case .awaitingMulligan:
-            return "Both players must settle their opening hand first."
+            return "The opening hand must be settled first."
         case .mulliganUnavailable:
-            return "You have already answered the mulligan."
+            return "The mulligan is not yours to take."
         case .invalidHandIndex:
             return "That card is no longer in your hand."
         case .unknownCard(let cardID):
             return "Card \(cardID) is missing from the card pool."
-        case .notEnoughChakra(let required, let available):
-            return "That costs \(required) chakra and you have \(available) ready."
-        case .charactersRowFull:
-            return "Your Characters row is full."
-        case .exCharacterAlreadyInPlay:
-            return "You may only have one EX Character in play."
-        case .summonZoneOccupied:
-            return "Your Summon zone is already occupied."
-        case .supportRowFull:
-            return "All five of your Support slots are full."
         case .notPlayableFromHand(let name):
             return "\(name) cannot be played from your hand."
-        case .noSupportLine(let name):
-            return "\(name) has no support line to play as a jutsu."
-        case .attackerUnavailable:
-            return "That character cannot attack right now."
         case .invalidTarget:
             return "That is not a legal target."
-        case .noAttackPending:
-            return "There is no attack to answer."
-        case .attackAlreadyPending:
-            return "Settle the declared attack first."
-        case .blockerUnavailable:
-            return "That character cannot block right now."
-        case .abilitySourceNotInPlay:
-            return "That card is not in play on your side of the board."
-        case .noSuchAbility(let name):
-            return "\(name) does not print that ability."
-        case .abilityNotActivated(let name):
-            return "That \(name) ability resolves on its own — there is nothing to press."
-        case .abilityAlreadyUsed(let name):
-            return "\(name) has already used that ability this turn."
-        case .notEnoughCharactersToTrash(let required, let available):
-            let bodies = required == 1 ? "character" : "characters"
-            return "That costs \(required) of your own \(bodies) and only \(available) can pay it."
-        case .cannotBeSummonedNormally(let name):
-            return "\(name) cannot be summoned normally — it has Summon Requirements."
-        case .abilityNeedsTarget:
-            return "Choose a card for that ability."
+        case .supportSlotEmpty(let slotIndex):
+            return "Support slot \(slotIndex + 1) is empty."
+        case .summonRequirementUnpaid(let name):
+            return "\(name) cannot pay its Summon Requirements."
+        case .noCounterWindow:
+            return "There is nothing to answer right now."
         }
     }
 

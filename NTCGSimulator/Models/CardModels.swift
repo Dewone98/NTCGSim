@@ -30,11 +30,17 @@ enum CardColor: String, Codable, CaseIterable, Identifiable, Hashable {
 
 /// What role the card plays. Leaders anchor a deck, Characters fight, Chakra
 /// pays for things, and Summons occupy their own dedicated zone.
+///
+/// There is deliberately no `support` case. Support is a *mode* a card is used
+/// in, not a type it is printed as: a card carrying a SUPPORT bar may be set
+/// face-down in a Support slot instead of being summoned, and the very same card
+/// can still be summoned as a body. `Card.canSetAsSupport` is what decides that,
+/// and no card in the pool was ever typed `support` — the case was the app's
+/// own invention.
 enum CardType: String, Codable, CaseIterable, Identifiable, Hashable {
     case leader
     case character
     case exCharacter
-    case support
     case chakra
     case summon
 
@@ -45,7 +51,6 @@ enum CardType: String, Codable, CaseIterable, Identifiable, Hashable {
         case .leader:      return "Leader"
         case .character:   return "Character"
         case .exCharacter: return "EX Character"
-        case .support:     return "Support"
         case .chakra:      return "Chakra"
         case .summon:      return "Summon"
         }
@@ -59,14 +64,6 @@ enum CardType: String, Codable, CaseIterable, Identifiable, Hashable {
     /// Whether copies of this card belong in the main 50-card deck.
     var countsTowardDeckSize: Bool {
         self != .leader && self != .chakra && self != .summon
-    }
-
-    /// Whether playing this card spends Chakra.
-    ///
-    /// Summoning a body is free — Chakra is only spent on Support cards and on
-    /// cards played as a jutsu via their Support line.
-    var costsChakraToPlay: Bool {
-        self == .support
     }
 }
 
@@ -100,13 +97,15 @@ enum Rarity: String, Codable, CaseIterable, Identifiable, Hashable {
 /// Works out what a play actually costs.
 enum ChakraCost {
 
-    /// Chakra spent to put a card into play.
+    /// Chakra spent to use a card from hand in one of its three modes.
     ///
-    /// Summoning a Character or an EX Character is free. Chakra is spent only
-    /// when a card is played as a jutsu through its Support line, or when the
-    /// card is a Support card in its own right.
-    static func toPlay(_ card: Card, asJutsu: Bool) -> Int {
-        guard asJutsu || card.type.costsChakraToPlay else { return 0 }
+    /// Summoning a body is free, and so is setting a card face-down as a
+    /// Support — the reference charges nothing for either. The printed number is
+    /// the price of the card's jutsu, and it is also the chakra printed on the
+    /// left of a SUPPORT bar, paid later when the face-down card is flipped to
+    /// answer a response window.
+    static func toPlay(_ card: Card, mode: CardPlayMode) -> Int {
+        guard mode == .jutsu else { return 0 }
         return max(0, card.cost ?? 0)
     }
 }
@@ -153,6 +152,15 @@ struct Card: Codable, Identifiable, Hashable {
     /// being summoned as a body.
     var supportText: String?
 
+    /// Whether the card prints a SUPPORT bar across its lower third, and so may
+    /// be set face-down in a numbered Support slot.
+    ///
+    /// Twelve of the thirty-five shipped cards print one. The bar reads
+    /// `CHAKRA n | SUPPORT | <jutsu name>` with the box's own trigger inside it,
+    /// which is why the bar is a container and not a trigger — an earlier audit
+    /// mistook the two and under-counted the settable cards at six.
+    var canSetAsSupport: Bool = false
+
     /// Every ability box printed on the card, in print order.
     ///
     /// Replaces a single invented `LeaderAbility`: real cards print several
@@ -191,6 +199,7 @@ struct Card: Codable, Identifiable, Hashable {
         life        = try box.decodeIfPresent(Int.self, forKey: .life)
         effect      = try box.decodeIfPresent(String.self, forKey: .effect) ?? ""
         supportText = try box.decodeIfPresent(String.self, forKey: .supportText)
+        canSetAsSupport = try box.decodeIfPresent(Bool.self, forKey: .canSetAsSupport) ?? false
         artist      = try box.decodeIfPresent(String.self, forKey: .artist)
         artFilename = try box.decodeIfPresent(String.self, forKey: .artFilename)
         abilities   = try box.decodeIfPresent([CardAbility].self, forKey: .abilities) ?? []
@@ -202,13 +211,15 @@ struct Card: Codable, Identifiable, Hashable {
          rarity: Rarity, setCode: String, traits: [String] = [],
          cost: Int? = nil, power: Int? = nil, damage: Int? = nil,
          health: Int? = nil, life: Int? = nil, effect: String = "",
-         supportText: String? = nil, artist: String? = nil,
-         artFilename: String? = nil, abilities: [CardAbility] = []) {
+         supportText: String? = nil, canSetAsSupport: Bool = false,
+         artist: String? = nil, artFilename: String? = nil,
+         abilities: [CardAbility] = []) {
         self.id = id; self.name = name; self.type = type; self.color = color
         self.rarity = rarity; self.setCode = setCode; self.traits = traits
         self.cost = cost; self.power = power; self.damage = damage
         self.health = health; self.life = life; self.effect = effect
-        self.supportText = supportText; self.artist = artist
+        self.supportText = supportText; self.canSetAsSupport = canSetAsSupport
+        self.artist = artist
         self.artFilename = artFilename; self.abilities = abilities
     }
 
@@ -236,23 +247,29 @@ struct Card: Codable, Identifiable, Hashable {
         abilities.contains { !$0.isFullyImplemented }
     }
 
-    /// Whether this card gives chakra something to be spent on: a Support card,
-    /// or any card with a Support line that may be played as a jutsu.
+    /// Whether this card gives chakra something to be spent on: its jutsu, or
+    /// the SUPPORT bar it is flipped face-up through.
     ///
     /// A deck holding none of these plays with a dead resource, so the deck
     /// builder and the starter decks both reason in terms of this rather than
-    /// the Support type alone — a set may print no Support cards at all.
+    /// counting a card type that no longer exists.
     var isChakraSink: Bool {
-        type == .support || hasSupportLine
+        hasSupportLine || canSetAsSupport
     }
 
     /// Chakra spent to summon this card as a body. Always zero — summoning is
     /// free — but expressed here so the UI never has to assume it.
-    var summonCost: Int { ChakraCost.toPlay(self, asJutsu: false) }
+    var summonCost: Int { ChakraCost.toPlay(self, mode: .summon) }
 
     /// Chakra spent to play this card as a jutsu, when it can be.
     var jutsuCost: Int? {
-        hasSupportLine ? ChakraCost.toPlay(self, asJutsu: true) : nil
+        hasSupportLine ? ChakraCost.toPlay(self, mode: .jutsu) : nil
+    }
+
+    /// Chakra printed on the left of the SUPPORT bar: what flipping this card
+    /// face-up to answer a response window costs. `nil` when it prints no bar.
+    var supportFlipCost: Int? {
+        canSetAsSupport ? max(0, cost ?? 0) : nil
     }
 
     /// The stat line shown in compact list rows, e.g. `"3 / 6000 / 2"`.
@@ -271,7 +288,7 @@ extension Card {
     /// Collection and deck-builder ordering: by type, then cost, then number.
     static func displayOrder(_ a: Card, _ b: Card) -> Bool {
         if a.type != b.type {
-            let order: [CardType] = [.leader, .character, .exCharacter, .support, .summon, .chakra]
+            let order: [CardType] = [.leader, .character, .exCharacter, .summon, .chakra]
             let ai = order.firstIndex(of: a.type) ?? order.count
             let bi = order.firstIndex(of: b.type) ?? order.count
             return ai < bi

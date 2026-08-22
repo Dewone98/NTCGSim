@@ -2,452 +2,695 @@
 //  AbilityResolver.swift
 //  NTCGSimulator
 //
-//  Turns the printed steps of one ability box into board changes.
+//  Turns the structured steps of one ability box into board changes.
 //
 //  This is deliberately separate from `GameEngine`. The engine decides whether
-//  an ability may be used at all — whose turn it is, which phase, whether the
-//  cost can be paid, whether the target is legal — and this decides what the
-//  ability then does. Splitting them keeps the timing rules in one place and
-//  the effect table in another, and it means the engine never grows a switch
-//  over `AbilityEffect`.
+//  an ability may be used at all — timing, priority, cost, targets — and runs
+//  the windows and prompts around it; this decides what the ability then does.
+//  A resolution reports what it needs the engine to carry on with: journal
+//  lines, prompts to raise, freshly summoned bodies whose own On Summon boxes
+//  must fire, and whether the resolving card stays on the board.
 //
-//  Nothing here guesses. A step the app cannot resolve arrives as
-//  `.unimplemented` and leaves as a journal line saying, in words a player can
-//  read, that it was not applied. Silence would be worse than a missing rule:
-//  a player who cannot see what was skipped cannot correct for it.
+//  Support immunity lives here too, with the reference's exact shape: it only
+//  protects while a support is resolving or the chain is live, only for the
+//  turn it was granted, and only against the player it was granted against.
 //
 
 import Foundation
 
-// MARK: - Board target
+// MARK: - Effect lines
 
-/// One card on the board an effect acts on, with the side that owns it. Effects
-/// routinely reach across the table, so the side is carried rather than assumed.
-struct BoardTarget: Hashable {
+/// One journal line produced by a resolution: who it belongs to — `nil` for
+/// the engine's own voice — and what happened.
+struct EffectLine: Hashable {
+    let actor: PlayerSlot?
+    let message: String
+}
+
+// MARK: - Result
+
+/// What a resolution did, reported back rather than acted on. Ending the
+/// game, journalling, cascading On Summon triggers and opening prompts all
+/// belong to the engine; the resolver names them and the engine acts.
+struct EffectResult {
+
+    /// Journal lines, in the order they happened.
+    var lines: [EffectLine] = []
+
+    /// Prompts the effects raised, in order. The engine queues them.
+    var choices: [PendingChoice] = []
+
+    /// Bodies the effects put on the board. The engine runs each one's
+    /// On Summon boxes — unless its effects arrived negated — in order.
+    var summoned: [SummonedCharacter] = []
+
+    /// True when the resolving card self-summoned and must not be trashed.
+    var keepsCard: Bool = false
+
+    /// True when a self-cost took the activator to zero life — the opponent
+    /// wins on the spot.
+    var activatorLifeReachedZero: Bool = false
+
+    mutating func say(_ actor: PlayerSlot?, _ message: String) {
+        lines.append(EffectLine(actor: actor, message: message))
+    }
+}
+
+/// A body a resolution placed, so the engine can fire its triggers.
+struct SummonedCharacter: Hashable {
     let slot: PlayerSlot
-    let id: UUID
+    let characterID: UUID
 }
 
-// MARK: - Context
+// MARK: - Source
 
-/// Everything an ability needs to know about the moment it is resolving in.
-///
-/// It is a value rather than a set of arguments because every effect case wants
-/// most of it, and because a resolution is worth being able to describe in one
-/// piece when something goes wrong.
-struct AbilityContext {
-
-    /// The card the ability is printed on.
-    let source: AbilitySource
-
-    /// The player who activated it, or whose card triggered it.
-    let controller: PlayerSlot
-
-    /// The printed card behind `source`, for names and traits.
+/// The moment an effect list is resolving in: whose card, and which targets
+/// were locked when it was activated.
+struct EffectSource {
     let card: Card
-
-    /// The box being resolved.
-    let ability: CardAbility
-
-    /// The card the player chose, when the ability's scope asked for one.
-    let targetID: UUID?
-
-    /// Hand positions the player nominated, for a step that asks them to give
-    /// cards up. Empty when nobody was asked.
-    let handSelection: [Int]
-}
-
-// MARK: - Outcome
-
-/// What a resolution did, reported back rather than acted on.
-///
-/// Two consequences belong to the engine and not to the effect table: ending
-/// the game, and writing the log. The resolver names them and the engine acts,
-/// so an ability can never end a game by a different route than the turn draw
-/// or a connecting attack does.
-struct AbilityOutcome {
-
-    /// Journal lines, in the order they happened. The engine records each one
-    /// against the controller.
-    var lines: [String] = []
-
-    /// A side that was asked to draw from an empty deck.
-    var deckedOut: PlayerSlot?
-
-    /// A side whose Leader ran out of life while this resolved.
-    var defeated: PlayerSlot?
-
-    /// True when at least one printed step was displayed rather than applied.
-    var hadUnappliedSteps: Bool = false
+    let controller: PlayerSlot
+    var lockedTargets: [UUID] = []
 }
 
 // MARK: - Resolver
 
-/// Applies `[AbilityEffect]` to a board.
+/// Applies `[AbilityEffect]` to a board and answers targeting questions.
 struct AbilityResolver {
 
-    /// Card lookups, for names, traits and printed power. Read only.
+    /// Card lookups, for names, traits and printed stats. Read only.
     let database: CardDatabase
 
-    // MARK: Resolving
+    // MARK: - Immunity
 
-    /// Resolves every step of the ability in `context`, in printed order.
-    ///
-    /// Steps are applied one after another against the board as it stands, so a
-    /// later step sees what an earlier one did — an ability that draws and then
-    /// puts a card back is placing the card it just drew.
-    func resolve(_ context: AbilityContext, in state: inout GameState) -> AbilityOutcome {
-        var outcome = AbilityOutcome()
-        for effect in context.ability.effects {
-            apply(effect, context: context, in: &state, into: &outcome)
-        }
-        if outcome.lines.isEmpty {
-            outcome.lines.append("\(context.card.name) had nothing to resolve.")
-        }
-        return outcome
+    /// The reference's immunity gate, exactly: active only while a support is
+    /// resolving or the chain is non-empty, only for the turn it was granted,
+    /// and only against the recorded opponent — any non-owner as a fallback.
+    /// Nothing outside that gate — combat, leader effects, EX payments — ever
+    /// consults it.
+    func isImmune(
+        _ character: CharacterInPlay,
+        owner: PlayerSlot,
+        against actor: PlayerSlot,
+        in state: GameState
+    ) -> Bool {
+        guard state.resolvingSupport != nil || !state.chain.isEmpty else { return false }
+        guard character.supportImmuneUntilTurn >= state.turnNumber else { return false }
+        if let from = character.supportImmuneFrom { return actor == from }
+        return actor != owner
     }
 
-    // MARK: - Effects
+    // MARK: - Running effects
+
+    /// Resolves every step in `ability`, in printed order, against the board
+    /// as it stands — a later step sees what an earlier one did.
+    func runEffects(
+        _ ability: CardAbility,
+        source: EffectSource,
+        in state: inout GameState
+    ) -> EffectResult {
+        var result = EffectResult()
+        for effect in ability.effects {
+            guard !state.isFinished, !result.activatorLifeReachedZero else { break }
+            apply(effect, source: source, in: &state, into: &result)
+        }
+        return result
+    }
+
+    // MARK: - Effect table
 
     private func apply(
         _ effect: AbilityEffect,
-        context: AbilityContext,
+        source: EffectSource,
         in state: inout GameState,
-        into outcome: inout AbilityOutcome
+        into result: inout EffectResult
     ) {
+        let slot = source.controller
+        let name = source.card.name
+
         switch effect {
 
         case .drawCards(let count):
-            draw(count, for: context.controller, in: &state, into: &outcome)
+            // A Leader-effect draw: raw, so an empty deck simply yields no
+            // card — the deck-out sweep decides the game at the next check.
+            var drawn = 0
+            for _ in 0..<count where !state[slot].deck.isEmpty {
+                state[slot].hand.append(state[slot].deck.removeFirst())
+                drawn += 1
+            }
+            if drawn > 0 {
+                result.say(slot, "Draws \(drawn), hand \(state[slot].hand.count), deck \(state[slot].deck.count).")
+            }
 
         case .placeFromHandOnDeck(let count):
-            placeOnDeck(count, context: context, in: &state, into: &outcome)
+            guard !state[slot].hand.isEmpty else { return }
+            result.choices.append(PendingChoice(
+                id: state.makeIdentifier(),
+                kind: .leaderPutBack,
+                player: slot,
+                prompt: "Place a card from your hand on top of your deck",
+                options: handOptions(for: slot, in: state),
+                cancellable: false,
+                maxSelections: count,
+                data: choiceData(sourceCardID: source.card.id)
+            ))
 
         case .gainLife(let amount):
             guard amount > 0 else { return }
-            state[context.controller].life += amount
-            outcome.lines.append("Gained \(amount) life, up to \(state[context.controller].life).")
+            state[slot].life += amount
+            result.say(slot, "Gained \(amount) life, up to \(state[slot].life).")
 
         case .loseLife(let amount):
             guard amount > 0 else { return }
-            let slot = context.controller
             state[slot].life = max(0, state[slot].life - amount)
-            outcome.lines.append("Lost \(amount) life, down to \(state[slot].life).")
-            if state[slot].life == 0 { outcome.defeated = slot }
+            result.say(slot, "Paid \(amount) life, down to \(state[slot].life).")
+            if state[slot].life == 0 { result.activatorLifeReachedZero = true }
 
-        case .buffPower(let amount, let scope):
-            let hits = targets(for: scope, context: context, in: state)
-            guard report(hits, effect: effect, into: &outcome) else { return }
-            for hit in hits {
-                guard let index = state[hit.slot].indexOfCharacter(id: hit.id) else { continue }
-                state[hit.slot].characters[index].powerBonus += amount
+        case .negateChainLink:
+            negateTopChainLink(by: slot, negatorName: name, in: &state, into: &result)
+
+        case .interruptAttack:
+            interruptAttack(by: slot, in: &state, into: &result)
+
+        case .chakraLock:
+            // Blocks the activator's next own Recovery: through the end of
+            // their next turn when it is their turn now, one turn less when
+            // it is not — the same net effect either way.
+            let lockedUntil = state.turnNumber + (slot == state.current ? 3 : 2)
+            state[slot].chakraLockedUntilTurn = max(state[slot].chakraLockedUntilTurn, lockedUntil)
+            result.say(slot, "Cannot turn chakra face-up until after their next turn.")
+
+        case .summonSelf:
+            let id = placeCharacter(cardID: source.card.id, for: slot, in: &state)
+            result.keepsCard = true
+            result.summoned.append(SummonedCharacter(slot: slot, characterID: id))
+            result.say(slot, "Summons \(name).")
+
+        case .doubleChosenPower:
+            applyToLockedTarget(source, in: &state, into: &result) { state, owner, index in
+                state[owner].characters[index].powerDoubledUntilTurn = state.turnNumber
+                let cardName = self.characterName(state[owner].characters[index])
+                return "\(cardName)'s power is doubled this turn."
             }
-            outcome.lines.append("\(list(hits, in: state)) got \(signed(amount)) power for the turn.")
 
-        case .buffDamage(let amount, let scope):
-            let hits = targets(for: scope, context: context, in: state)
-            guard report(hits, effect: effect, into: &outcome) else { return }
-            for hit in hits {
-                guard let index = state[hit.slot].indexOfCharacter(id: hit.id) else { continue }
-                state[hit.slot].characters[index].damageBonus += amount
+        case .grantSupportImmunity:
+            applyToLockedTarget(source, in: &state, into: &result) { state, owner, index in
+                state[owner].characters[index].supportImmuneUntilTurn = state.turnNumber
+                state[owner].characters[index].supportImmuneFrom = slot.opposing
+                let cardName = self.characterName(state[owner].characters[index])
+                return "\(cardName) ignores \(slot.opposing.title)'s Support effects this turn."
             }
-            outcome.lines.append("\(list(hits, in: state)) got \(signed(amount)) damage for the turn.")
 
-        case .grantRush(let scope):
-            let hits = targets(for: scope, context: context, in: state)
-            guard report(hits, effect: effect, into: &outcome) else { return }
-            for hit in hits {
-                guard let index = state[hit.slot].indexOfCharacter(id: hit.id) else { continue }
-                state[hit.slot].characters[index].hasRush = true
+        case .knockOutAll:
+            for side in PlayerSlot.allCases {
+                for character in state[side].characters {
+                    guard !isImmune(character, owner: side, against: slot, in: state) else {
+                        result.say(side, "\(characterName(character)) was protected and survived.")
+                        continue
+                    }
+                    state[side].sendCharacterToTrash(id: character.id)
+                    result.say(side, "\(characterName(character)) was sent to the Trash.")
+                }
             }
-            outcome.lines.append("\(list(hits, in: state)) gained Rush and can attack this turn.")
+            result.say(slot, "\(name) K.O.s all characters.")
 
-        case .knockOut(let scope):
-            let hits = targets(for: scope, context: context, in: state)
-            guard report(hits, effect: effect, into: &outcome) else { return }
-            // Names are read before the bodies leave, or there is nothing left
-            // to name them from.
-            let names = list(hits, in: state)
-            for hit in hits {
-                state[hit.slot].sendCharacterToTrash(id: hit.id)
+        case .knockOutChosen(let count, let upTo, let restedOnly, let nonEXOnly):
+            if source.lockedTargets.isEmpty {
+                // No targets were locked — possible only for an "up to" card
+                // activated bare, or a K.O. raised by an On Summon box. Ask
+                // now, immunity-filtered, one pick at a time.
+                let options = characterOptions(
+                    restedOnly: restedOnly, nonEXOnly: nonEXOnly,
+                    excluding: [], immuneAgainst: slot, in: state
+                )
+                guard !options.isEmpty else { return }
+                var data = choiceData(sourceCardID: source.card.id)
+                data.remaining = count
+                data.restedOnly = restedOnly
+                data.nonEXOnly = nonEXOnly
+                data.upTo = upTo
+                result.choices.append(PendingChoice(
+                    id: state.makeIdentifier(),
+                    kind: .koTarget,
+                    player: slot,
+                    prompt: "Choose a character to K.O.",
+                    options: options,
+                    cancellable: upTo,
+                    alwaysAsk: true,
+                    data: data
+                ))
+                return
             }
-            outcome.lines.append("\(names) knocked out and sent to the Trash.")
+            for targetID in source.lockedTargets {
+                knockOut(targetID, by: slot, in: &state, into: &result)
+            }
 
-        case .restSelf:
-            rest(context: context, in: &state, into: &outcome)
+        case .returnChosenToHand:
+            for targetID in source.lockedTargets {
+                guard let found = state.locateCharacter(id: targetID) else {
+                    result.say(slot, "The chosen card had already left the board.")
+                    continue
+                }
+                guard !isImmune(found.character, owner: found.slot, against: slot, in: state) else {
+                    result.say(found.slot, "\(characterName(found.character)) was protected and stayed.")
+                    continue
+                }
+                state[found.slot].bounceCharacterToHand(id: targetID)
+                result.say(found.slot, "\(characterName(found.character)) was returned to its owner's hand.")
+            }
 
-        case .flipAllChakraFaceUp:
-            let flipped = state[context.controller].readyAllChakra()
-            outcome.lines.append(
-                flipped == 0
-                    ? "All chakra was already face-up."
-                    : "Turned \(flipped) chakra face-up."
+        case .boostChosenPower(let amount):
+            let options = characterOptions(
+                restedOnly: false, nonEXOnly: false,
+                excluding: [], immuneAgainst: nil, in: state
             )
+            guard !options.isEmpty else { return }
+            var data = choiceData(sourceCardID: source.card.id)
+            data.amount = amount
+            result.choices.append(PendingChoice(
+                id: state.makeIdentifier(),
+                kind: .leaderBoost,
+                player: slot,
+                prompt: "Choose a character to get +\(amount) power this turn",
+                options: options,
+                cancellable: true,
+                data: data
+            ))
 
-        case .cannotAttackNextTurn(let scope):
-            let hits = targets(for: scope, context: context, in: state)
-            guard report(hits, effect: effect, into: &outcome) else { return }
-            for hit in hits {
-                guard let index = state[hit.slot].indexOfCharacter(id: hit.id) else { continue }
-                state[hit.slot].characters[index].isBarredNextTurn = true
+        case .teamBoost(_, let boosts, let power, let damage):
+            var boosted: [String] = []
+            for index in state[slot].characters.indices {
+                let character = state[slot].characters[index]
+                guard let card = database.card(id: character.cardID),
+                      boosts.contains(card.name) else { continue }
+                state[slot].characters[index].powerBonus += power
+                state[slot].characters[index].damageBonus += damage
+                state[slot].characters[index].rushUntilTurn = state.turnNumber
+                boosted.append(card.name)
             }
-            outcome.lines.append("\(list(hits, in: state)) cannot attack on its controller's next turn.")
+            if !boosted.isEmpty {
+                result.say(slot, "\(boosted.joined(separator: ", ")) gain +\(power) power, +\(damage) damage and Rush this turn.")
+            }
 
-        case .cannotBeSummonedNormally:
-            // A standing rule, not a moment: the board enforces it when the
-            // card is played. Saying so keeps the step from looking skipped.
-            outcome.lines.append(
-                "\(context.card.name) cannot be summoned normally — that is checked when it is played."
-            )
+        case .freezeChosenIfRevealTrait(let trait):
+            var options: [ChoiceOption] = []
+            for side in PlayerSlot.allCases {
+                let leaderName = database.card(id: state[side].leaderCardID)?.name ?? "Leader"
+                options.append(ChoiceOption(
+                    key: "leader-\(side.rawValue)",
+                    target: .leader(side),
+                    title: "\(leaderName) (\(side.title) Leader)"
+                ))
+            }
+            options.append(contentsOf: characterOptions(
+                restedOnly: false, nonEXOnly: false,
+                excluding: [], immuneAgainst: nil, in: state
+            ))
+            var data = choiceData(sourceCardID: source.card.id)
+            data.trait = trait
+            result.choices.append(PendingChoice(
+                id: state.makeIdentifier(),
+                kind: .freezeTarget,
+                player: slot,
+                prompt: "Choose a Leader or character to freeze",
+                options: options,
+                cancellable: false,
+                alwaysAsk: true,
+                data: data
+            ))
+
+        case .summonFromTrash(let names):
+            let options = trashCharacterOptions(names: names, for: slot, in: state)
+            guard !options.isEmpty else { return }
+            result.choices.append(PendingChoice(
+                id: state.makeIdentifier(),
+                kind: .reviveFromTrash,
+                player: slot,
+                prompt: "Choose a character in your trash to summon",
+                options: options,
+                cancellable: false,
+                data: choiceData(sourceCardID: source.card.id)
+            ))
+
+        case .revealTopAndSummon(let names, let traits):
+            revealTopAndSummon(names: names, traits: traits, for: slot, in: &state, into: &result)
+
+        case .searchSummonNegated(let searchName):
+            let options = deckAndTrashOptions(name: searchName, for: slot, in: state)
+            guard !options.isEmpty else { return }
+            result.choices.append(PendingChoice(
+                id: state.makeIdentifier(),
+                kind: .searchSummon,
+                player: slot,
+                prompt: "Summon up to 1 [\(searchName)] with its effects negated",
+                options: options,
+                cancellable: true,
+                data: choiceData(sourceCardID: source.card.id)
+            ))
+
+        case .rush, .conditionalRush, .cannotBeSummonedNormally, .recovery:
+            // Standing rules and engine-level actions: nothing fires here.
+            return
 
         case .unimplemented(let text):
-            outcome.hadUnappliedSteps = true
-            outcome.lines.append(
-                "NOT APPLIED — \(context.card.name) reads \"\(text)\", and the app does not resolve that step yet. Settle it between yourselves."
-            )
+            result.say(slot, "NOT APPLIED — \(name) reads \"\(text)\", and the app does not resolve that step yet.")
         }
     }
 
-    // MARK: Cards
+    // MARK: - Chain answers
 
-    /// Draws one card at a time so an empty deck is caught exactly where it
-    /// happens. Deciding the game is the engine's job, so the empty deck is
-    /// reported rather than acted on.
-    private func draw(
-        _ count: Int,
+    /// "Negate that card": the top remaining link is cancelled outright — its
+    /// card leaves its slot for its owner's trash having done nothing, and
+    /// its chakra stays paid. Whiffs silently on an empty chain.
+    private func negateTopChainLink(
+        by slot: PlayerSlot,
+        negatorName: String,
+        in state: inout GameState,
+        into result: inout EffectResult
+    ) {
+        guard let negated = state.chain.popLast() else { return }
+        state[negated.player].removeSupport(id: negated.id)
+        state[negated.player].trash.append(negated.cardID)
+        let negatedName = database.card(id: negated.cardID)?.name ?? negated.cardID
+        result.say(slot, "\(negatorName) negates \(negatedName) — it goes to the Trash having done nothing.")
+    }
+
+    /// "Interrupt": the pending attack is cancelled, but the attacker stays
+    /// rested and keeps its spent attack. A support-immune attacker shrugs
+    /// the interrupt off entirely.
+    private func interruptAttack(
+        by slot: PlayerSlot,
+        in state: inout GameState,
+        into result: inout EffectResult
+    ) {
+        guard let attack = state.pendingAttack else { return }
+        if let attackerID = attack.attacker.characterID,
+           let attacker = state[attack.attackingSlot].character(id: attackerID),
+           isImmune(attacker, owner: attack.attackingSlot, against: slot, in: state) {
+            result.say(slot, "The attacker was protected — the attack goes ahead.")
+            return
+        }
+        state.pendingAttack = nil
+        result.say(slot, "The attack is interrupted. The attacker stays rested.")
+    }
+
+    // MARK: - Board changes
+
+    /// Places a fresh body on `slot`'s field, with summoning sickness. The
+    /// caller owns running its On Summon boxes and journalling the arrival.
+    func placeCharacter(
+        cardID: String,
+        for slot: PlayerSlot,
+        negated: Bool = false,
+        in state: inout GameState
+    ) -> UUID {
+        let card = database.card(id: cardID)
+        let character = CharacterInPlay(
+            id: state.makeIdentifier(),
+            cardID: cardID,
+            isEX: card?.type == .exCharacter,
+            summonedOnTurn: state.turnNumber,
+            effectsNegated: negated
+        )
+        state[slot].characters.append(character)
+        return character.id
+    }
+
+    /// K.O.s one character, respecting immunity and vanished targets.
+    func knockOut(
+        _ targetID: UUID,
+        by actor: PlayerSlot,
+        in state: inout GameState,
+        into result: inout EffectResult
+    ) {
+        guard let found = state.locateCharacter(id: targetID) else {
+            result.say(actor, "The chosen card had already left the board.")
+            return
+        }
+        guard !isImmune(found.character, owner: found.slot, against: actor, in: state) else {
+            result.say(found.slot, "\(characterName(found.character)) was protected and survived.")
+            return
+        }
+        state[found.slot].sendCharacterToTrash(id: targetID)
+        result.say(found.slot, "\(characterName(found.character)) was K.O.'d and sent to the Trash.")
+    }
+
+    /// Itachi's freeze payoff: reveal the summoner's top deck card — it stays
+    /// on the deck — and freeze the chosen target if the reveal prints the
+    /// gating trait. Immunity is deliberately not consulted, exactly as the
+    /// reference never routes the freeze through its immunity gate.
+    func applyFreeze(
+        target: ChoiceTarget,
+        trait: String,
+        by slot: PlayerSlot,
+        in state: inout GameState
+    ) -> [EffectLine] {
+        var lines: [EffectLine] = []
+        guard let topID = state[slot].deck.first else {
+            lines.append(EffectLine(actor: slot, message: "Had no deck card to reveal."))
+            return lines
+        }
+        let revealed = database.card(id: topID)
+        let revealedName = revealed?.name ?? topID
+        lines.append(EffectLine(actor: slot, message: "Reveals \(revealedName) — it stays on top of the deck."))
+
+        guard revealed?.traits.contains(trait) == true else {
+            lines.append(EffectLine(actor: slot, message: "It has no {\(trait)} type — nothing is frozen."))
+            return lines
+        }
+
+        switch target {
+        case .leader(let side):
+            state[side].leaderCannotAttackUntilTurn = state.turnNumber + 1
+            lines.append(EffectLine(actor: side, message: "The Leader cannot attack next turn."))
+        case .character(let id):
+            if let found = state.locateCharacter(id: id),
+               let index = state[found.slot].indexOfCharacter(id: id) {
+                state[found.slot].characters[index].cannotAttackUntilTurn = state.turnNumber + 1
+                lines.append(EffectLine(
+                    actor: found.slot,
+                    message: "\(characterName(found.character)) cannot attack next turn."
+                ))
+            }
+        default:
+            break
+        }
+        return lines
+    }
+
+    /// Manda's and Jugo's reveal: the top deck card is shown, and summoned
+    /// only when it is a non-EX character matching the filters — empty
+    /// filters accept any non-EX character. A miss stays on top of the deck.
+    private func revealTopAndSummon(
+        names: [String],
+        traits: [String],
         for slot: PlayerSlot,
         in state: inout GameState,
-        into outcome: inout AbilityOutcome
+        into result: inout EffectResult
     ) {
-        guard count > 0 else { return }
-        var drawn = 0
-        var ranOut = false
-
-        for _ in 0..<count {
-            guard !state[slot].deck.isEmpty else {
-                ranOut = true
-                break
-            }
-            let cardID = state[slot].deck.removeFirst()
-            state[slot].hand.append(cardID)
-            drawn += 1
+        guard let topID = state[slot].deck.first else {
+            result.say(slot, "Had no deck card to reveal.")
+            return
         }
+        guard let revealed = database.card(id: topID) else { return }
+        result.say(slot, "Reveals \(revealed.name).")
 
-        if drawn > 0 {
-            // The card itself stays hidden: the journal never leaks a draw.
-            outcome.lines.append("Drew \(drawn) card\(drawn == 1 ? "" : "s").")
-        }
-        if ranOut {
-            outcome.lines.append("Could not draw from an empty deck.")
-            outcome.deckedOut = slot
-        }
-    }
+        let isPlainCharacter = revealed.type == .character
+        let matchesFilters = (names.isEmpty && traits.isEmpty)
+            || names.contains(revealed.name)
+            || revealed.traits.contains(where: traits.contains)
 
-    /// Puts cards from hand back on top of the deck.
-    ///
-    /// The player picks. When no pick reaches the engine — a headless replay, or
-    /// the AI, neither of which can be shown a hand picker — the most recently
-    /// drawn cards go back, because in this pool the step always follows a draw
-    /// and those are the cards the ability just handed over.
-    private func placeOnDeck(
-        _ count: Int,
-        context: AbilityContext,
-        in state: inout GameState,
-        into outcome: inout AbilityOutcome
-    ) {
-        let slot = context.controller
-        guard count > 0 else { return }
-        guard !state[slot].hand.isEmpty else {
-            outcome.lines.append("Had no cards in hand to place on top of the deck.")
+        guard isPlainCharacter, matchesFilters else {
+            result.say(slot, "It does not match — it stays on top of the deck.")
             return
         }
 
-        var chosen = Array(Set(context.handSelection.filter { state[slot].hand.indices.contains($0) }))
-        if chosen.count > count { chosen = Array(chosen.prefix(count)) }
-        if chosen.count < count {
-            let fallback = state[slot].hand.indices
-                .reversed()
-                .filter { !chosen.contains($0) }
-                .prefix(count - chosen.count)
-            chosen.append(contentsOf: fallback)
-        }
-
-        // Highest index first, so each removal leaves the rest still valid.
-        var moved = 0
-        for index in chosen.sorted(by: >) where state[slot].hand.indices.contains(index) {
-            let cardID = state[slot].hand.remove(at: index)
-            state[slot].deck.insert(cardID, at: 0)
-            moved += 1
-        }
-
-        if moved > 0 {
-            outcome.lines.append("Placed \(moved) card\(moved == 1 ? "" : "s") from hand on top of the deck.")
-        }
+        state[slot].deck.removeFirst()
+        let id = placeCharacter(cardID: topID, for: slot, in: &state)
+        result.summoned.append(SummonedCharacter(slot: slot, characterID: id))
+        result.say(slot, "Summons \(revealed.name).")
     }
 
-    /// Rests the card the ability is printed on. A Leader has no in-play
-    /// identity, so its own flag carries it.
-    private func rest(
-        context: AbilityContext,
+    /// Applies a closure to the single locked target, fizzling politely when
+    /// it vanished or is immune. Shared by double-power and immunity.
+    private func applyToLockedTarget(
+        _ source: EffectSource,
         in state: inout GameState,
-        into outcome: inout AbilityOutcome
+        into result: inout EffectResult,
+        change: (inout GameState, PlayerSlot, Int) -> String
     ) {
-        switch context.source {
-        case .leader:
-            state[context.controller].leaderIsRested = true
-        case .character(let id):
-            guard state[context.controller].character(id: id) != nil else {
-                outcome.lines.append("\(context.card.name) had already left the board and could not rest.")
-                return
-            }
-            state[context.controller].rest(characterID: id)
+        guard let targetID = source.lockedTargets.first else { return }
+        guard let found = state.locateCharacter(id: targetID),
+              let index = state[found.slot].indexOfCharacter(id: targetID) else {
+            result.say(source.controller, "The chosen card had already left the board.")
+            return
         }
-        outcome.lines.append("\(context.card.name) rested.")
+        guard !isImmune(found.character, owner: found.slot, against: source.controller, in: state) else {
+            result.say(found.slot, "\(characterName(found.character)) was protected — no effect.")
+            return
+        }
+        let line = change(&state, found.slot, index)
+        result.say(source.controller, line)
     }
 
-    // MARK: - Targeting
+    // MARK: - Option lists
 
-    /// The cards an effect's scope actually reaches, given the choice the
-    /// player made.
-    ///
-    /// Scopes that name a whole group resolve themselves. Scopes that ask for a
-    /// choice resolve to the chosen card, and to nothing at all when no legal
-    /// choice reached the engine — which is honest, and is reported.
-    func targets(
-        for scope: AbilityTargetScope,
-        context: AbilityContext,
+    /// Characters on both boards, near side first, optionally filtered by
+    /// rest state, EX status and immunity against `immuneAgainst`.
+    func characterOptions(
+        restedOnly: Bool,
+        nonEXOnly: Bool,
+        excluding: [UUID],
+        immuneAgainst actor: PlayerSlot?,
         in state: GameState
-    ) -> [BoardTarget] {
-        switch scope {
-        case .none:
-            return []
-
-        case .selfCard:
-            guard let id = context.source.characterID,
-                  state[context.controller].character(id: id) != nil else { return [] }
-            return [BoardTarget(slot: context.controller, id: id)]
-
-        case .ownTeam:
-            return state[context.controller].characters.map {
-                BoardTarget(slot: context.controller, id: $0.id)
+    ) -> [ChoiceOption] {
+        var options: [ChoiceOption] = []
+        for side in PlayerSlot.allCases {
+            for character in state[side].characters {
+                if excluding.contains(character.id) { continue }
+                if restedOnly, !character.isRested { continue }
+                if nonEXOnly, character.isEX { continue }
+                if let actor, isImmune(character, owner: side, against: actor, in: state) { continue }
+                options.append(ChoiceOption(
+                    key: "char-\(character.id.uuidString)",
+                    target: .character(character.id),
+                    title: "\(characterName(character)) (\(side.title))"
+                ))
             }
+        }
+        return options
+    }
 
-        case .allCharacters:
-            // Both sides. "K.O. all Characters" is printed without an owner,
-            // and it means the board, not your half of it.
-            return PlayerSlot.allCases.flatMap { slot in
-                state[slot].characters.map { BoardTarget(slot: slot, id: $0.id) }
-            }
-
-        case .anyCharacter, .friendlyCharacter, .opposingCharacter,
-             .restedCharacter, .leaderOrCharacter:
-            guard let targetID = context.targetID else { return [] }
-            let legal = AbilityResolver.candidates(for: scope, controller: context.controller, in: state)
-            return legal.filter { $0.id == targetID }
+    /// The chooser's whole hand, by position.
+    func handOptions(for slot: PlayerSlot, in state: GameState) -> [ChoiceOption] {
+        state[slot].hand.enumerated().map { index, cardID in
+            ChoiceOption(
+                key: "hand-\(index)",
+                target: .handCard(index: index),
+                title: database.card(id: cardID)?.name ?? cardID
+            )
         }
     }
 
-    /// Every card a scope would accept as a choice right now.
-    ///
-    /// `.leaderOrCharacter` offers characters only: a Leader has no in-play
-    /// identity to name, and nothing in the implemented ruleset has a Leader
-    /// attack or block, so the half of that scope the engine can honour is the
-    /// character half. An ability aimed at a Leader records itself as unapplied
-    /// rather than pretending.
-    static func candidates(
-        for scope: AbilityTargetScope,
-        controller: PlayerSlot,
-        in state: GameState
-    ) -> [BoardTarget] {
-        func bodies(_ slot: PlayerSlot) -> [BoardTarget] {
-            state[slot].characters.map { BoardTarget(slot: slot, id: $0.id) }
-        }
-
-        switch scope {
-        case .friendlyCharacter:
-            return bodies(controller)
-        case .opposingCharacter:
-            return bodies(controller.opposing)
-        case .anyCharacter, .leaderOrCharacter:
-            return bodies(controller) + bodies(controller.opposing)
-        case .restedCharacter:
-            return PlayerSlot.allCases.flatMap { slot in
-                state[slot].characters.filter(\.isRested).map { BoardTarget(slot: slot, id: $0.id) }
-            }
-        case .none, .allCharacters, .selfCard, .ownTeam:
-            return []
+    /// Non-EX character cards in `slot`'s trash whose names are listed.
+    func trashCharacterOptions(names: [String], for slot: PlayerSlot, in state: GameState) -> [ChoiceOption] {
+        state[slot].trash.enumerated().compactMap { index, cardID in
+            guard let card = database.card(id: cardID),
+                  card.type == .character,
+                  names.contains(card.name) else { return nil }
+            return ChoiceOption(
+                key: "trash-\(slot.rawValue)-\(index)",
+                target: .trashCard(slot: slot, index: index),
+                title: "\(card.name) (trash)"
+            )
         }
     }
 
-    // MARK: - Costs
-
-    /// The characters that would pay a cost's trash requirement, in board order.
-    ///
-    /// Which of several eligible bodies pays is immaterial to the rules, so the
-    /// engine takes them in the order they were summoned. Deterministic by
-    /// construction, which is what keeps a seeded game replaying identically.
-    ///
-    /// - Returns: fewer than `cost.trashOwnCharacters` when the cost cannot be
-    ///   paid, so the caller compares counts rather than handling an optional.
-    static func sacrifices(
-        for cost: AbilityCost,
-        controller: PlayerSlot,
-        in state: GameState,
-        database: CardDatabase
-    ) -> [UUID] {
-        guard cost.trashOwnCharacters > 0 else { return [] }
-        return state[controller].characters
-            .filter { character in
-                guard let card = database.card(id: character.cardID) else { return false }
-                if let trait = cost.trashTrait, !card.traits.contains(trait) { return false }
-                if let minimum = cost.trashMinimumPower,
-                   character.effectivePower(of: card) < minimum { return false }
-                return true
-            }
-            .prefix(cost.trashOwnCharacters)
-            .map(\.id)
+    /// Every character or EX Character named `name` in `slot`'s deck or
+    /// trash — the Naruto EX search pool.
+    func deckAndTrashOptions(name: String, for slot: PlayerSlot, in state: GameState) -> [ChoiceOption] {
+        var options: [ChoiceOption] = []
+        for (index, cardID) in state[slot].deck.enumerated() {
+            guard let card = database.card(id: cardID),
+                  card.type == .character || card.type == .exCharacter,
+                  card.name == name else { continue }
+            options.append(ChoiceOption(
+                key: "deck-\(slot.rawValue)-\(index)",
+                target: .deckCard(slot: slot, index: index),
+                title: "\(card.name) (deck)"
+            ))
+        }
+        for (index, cardID) in state[slot].trash.enumerated() {
+            guard let card = database.card(id: cardID),
+                  card.type == .character || card.type == .exCharacter,
+                  card.name == name else { continue }
+            options.append(ChoiceOption(
+                key: "trash-\(slot.rawValue)-\(index)",
+                target: .trashCard(slot: slot, index: index),
+                title: "\(card.name) (trash)"
+            ))
+        }
+        return options
     }
 
-    // MARK: - Wording
+    // MARK: - Summon Requirements
 
-    /// Records a line when a scope reached nothing, and reports whether the
-    /// effect should go ahead. Keeps every scoped case from repeating the guard.
-    private func report(
-        _ hits: [BoardTarget],
-        effect: AbilityEffect,
-        into outcome: inout AbilityOutcome
+    /// Whether `slots` can all be paid by distinct members of `candidates` —
+    /// the assignment problem behind an EX summon. Sizes are tiny, so a
+    /// straightforward backtrack is the honest solution.
+    static func assignmentExists(
+        slots: [TrashRequirement],
+        candidates: [(id: UUID, traits: [String], power: Int)]
     ) -> Bool {
-        guard hits.isEmpty else { return true }
-        outcome.lines.append("No card was in range, so \"\(effect.summary)\" did nothing.")
+        guard let slot = slots.first else { return true }
+        let rest = Array(slots.dropFirst())
+        for candidate in candidates
+        where slot.isSatisfied(byTraits: candidate.traits, effectivePower: candidate.power) {
+            let remaining = candidates.filter { $0.id != candidate.id }
+            if assignmentExists(slots: rest, candidates: remaining) { return true }
+        }
         return false
     }
 
-    /// Comma-separated printed names, falling back to the collector number if
-    /// the pool changed underneath a game in progress.
-    private func list(_ hits: [BoardTarget], in state: GameState) -> String {
-        let names = hits.map { hit -> String in
-            guard let character = state[hit.slot].character(id: hit.id) else { return "a character" }
-            return database.card(id: character.cardID)?.name ?? character.cardID
+    /// `slot`'s characters as requirement-payment candidates, with the
+    /// effective power the requirement checks.
+    func requirementCandidates(for slot: PlayerSlot, in state: GameState) -> [(id: UUID, traits: [String], power: Int)] {
+        state[slot].characters.compactMap { character in
+            guard let card = database.card(id: character.cardID) else { return nil }
+            return (
+                id: character.id,
+                traits: card.traits,
+                power: character.effectivePower(of: card, turn: state.turnNumber)
+            )
         }
-        return names.isEmpty ? "Nothing" : names.joined(separator: ", ")
     }
 
-    private func signed(_ amount: Int) -> String {
-        amount >= 0 ? "+\(amount)" : "\(amount)"
+    // MARK: - Naming
+
+    /// A character's printed name, falling back to its number if the pool has
+    /// changed underneath a game in progress.
+    func characterName(_ character: CharacterInPlay) -> String {
+        database.card(id: character.cardID)?.name ?? character.cardID
+    }
+
+    private func choiceData(sourceCardID: String) -> ChoiceData {
+        var data = ChoiceData()
+        data.sourceCardID = sourceCardID
+        return data
     }
 }
 
-// MARK: - Summon requirements
+// MARK: - Summon requirements on the card
 
 extension Card {
 
-    /// Whether the card prints "Cannot be summoned normally".
-    ///
-    /// These are the Summon Requirements cards: they only ever reach the board
-    /// through the requirement printed alongside, never by being played from
-    /// hand for their cost. `GameEngine.planPlay` refuses the normal summon on
-    /// the strength of this, which is the whole of what the flag is for.
+    /// Whether the card prints "Cannot be summoned normally" — every EX
+    /// Character in the shipped pool. Their printed Summon Requirements are
+    /// the only door onto the board.
     var cannotBeSummonedNormally: Bool {
         abilities.contains { $0.effects.contains(.cannotBeSummonedNormally) }
+    }
+
+    /// The card's printed Summon Requirements box, and where it sits in the
+    /// printed order.
+    var summonRequirement: (index: Int, ability: CardAbility)? {
+        guard let index = abilities.firstIndex(where: { $0.trigger == .summonRequirement }) else {
+            return nil
+        }
+        return (index, abilities[index])
+    }
+
+    /// The box the card's Support activation resolves — an alias kept beside
+    /// `supportBarAbility` because the two are the same printed line read
+    /// from hand and from a slot.
+    var jutsuAbility: (index: Int, ability: CardAbility)? {
+        supportBarAbility
+    }
+
+    /// The name shown on the activation button. The pool's own jutsu names
+    /// live in `supportText`; the card's name stands in when it has none.
+    var jutsuName: String {
+        guard let supportText, let dash = supportText.firstIndex(of: "—") else { return name }
+        let prefix = supportText[..<dash].trimmingCharacters(in: .whitespaces)
+        return prefix.isEmpty ? name : prefix
     }
 }

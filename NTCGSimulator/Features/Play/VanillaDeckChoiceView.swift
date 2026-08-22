@@ -51,7 +51,7 @@ struct VanillaDeckChoiceView: View {
             Text("Legal decks").sectionLabel()
 
             ForEach(playableDecks) { entry in
-                VanillaDeckRow(deck: entry.deck, leader: entry.leader) {
+                VanillaDeckRow(deck: entry.deck, leader: entry.leader, answers: entry.answers) {
                     start(with: entry.deck)
                 }
             }
@@ -74,7 +74,12 @@ struct VanillaDeckChoiceView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 ForEach(starters) { entry in
-                    VanillaDeckRow(deck: entry.deck, leader: entry.leader, isReadyMade: true) {
+                    VanillaDeckRow(
+                        deck: entry.deck,
+                        leader: entry.leader,
+                        answers: entry.answers,
+                        isReadyMade: true
+                    ) {
                         start(withReadyMade: entry.deck)
                     }
                 }
@@ -110,7 +115,7 @@ struct VanillaDeckChoiceView: View {
                 deck.isLegal(using: database),
                 let leader = database.card(id: deck.leaderID)
             else { return nil }
-            return PlayableDeck(deck: deck, leader: leader)
+            return PlayableDeck(deck: deck, leader: leader, answers: answerCount(in: deck))
         }
     }
 
@@ -118,8 +123,18 @@ struct VanillaDeckChoiceView: View {
     private var starters: [PlayableDeck] {
         StarterDecks.all(using: database).compactMap { deck in
             guard let leader = database.card(id: deck.leaderID) else { return nil }
-            return PlayableDeck(deck: deck, leader: leader)
+            return PlayableDeck(deck: deck, leader: leader, answers: answerCount(in: deck))
         }
+    }
+
+    /// Cards in a deck printing a SUPPORT bar.
+    ///
+    /// Only those can be set face-down, and only a face-down card can answer a
+    /// response window — so this is the count of answers the deck takes into the
+    /// game, and the one thing about a deck list worth knowing before the game
+    /// starts that the card count does not already say.
+    private func answerCount(in deck: Deck) -> Int {
+        deck.cardIDs.reduce(0) { $0 + (database.card(id: $1)?.canSetAsSupport == true ? 1 : 0) }
     }
 
     private var subtitle: String {
@@ -170,18 +185,27 @@ struct VanillaDeckChoiceView: View {
 
 // MARK: - Row
 
-/// A deck plus the Leader it is built around.
+/// A deck plus the Leader it is built around and the answers it carries.
 private struct PlayableDeck: Identifiable {
     let deck: Deck
     let leader: Card
 
+    /// Cards printing a SUPPORT bar — see `answerCount(in:)`.
+    let answers: Int
+
     var id: UUID { deck.id }
 }
 
-/// One selectable deck: colour bar, Leader face, name and size.
+/// One selectable deck: colour bar, Leader face, name, size and answers.
 private struct VanillaDeckRow: View {
     let deck: Deck
     let leader: Card
+
+    /// Cards in the list that print a SUPPORT bar, and so can be set face-down
+    /// to answer a response window. A deck carrying none is legal and playable,
+    /// but it can never answer anything and its chakra has nothing to buy — so
+    /// the count is shown before the game rather than discovered during it.
+    let answers: Int
 
     /// Marks the row as one of the app's decks rather than the player's, which
     /// changes the keyline and adds a badge — the choice it offers is the same.
@@ -220,6 +244,8 @@ private struct VanillaDeckRow: View {
                 Spacer(minLength: 0)
 
                 CountPill(label: "Cards", value: "\(deck.count)")
+                CountPill(label: "Answers", value: "\(answers)")
+                    .opacity(answers == 0 ? 0.7 : 1)
 
                 Image(systemName: "chevron.right")
                     .font(Typeface.label(12))
@@ -255,7 +281,10 @@ private struct VanillaDeckRow: View {
 
     private var label: String {
         let kind = isReadyMade ? "Ready-made deck " : ""
-        return "\(kind)\(deck.name), led by \(leader.name), \(deck.count) cards"
+        let answered = answers == 0
+            ? "no cards to answer a response window with"
+            : "\(answers) cards to answer a response window with"
+        return "\(kind)\(deck.name), led by \(leader.name), \(deck.count) cards, \(answered)"
     }
 }
 
@@ -274,23 +303,31 @@ private struct VanillaDeckRow: View {
     let database = CardDatabase()
 
     if let leader = database.leaders.first {
+        let built = Deck(
+            name: "Hidden Leaf aggro",
+            leaderID: leader.id,
+            cardIDs: Array(
+                database.cardsPlayable(with: leader)
+                    .flatMap { Array(repeating: $0.id, count: DeckRules.maxCopies) }
+                    .prefix(DeckRules.requiredSize)
+            )
+        )
+
         VStack(spacing: Metrics.spacingM) {
             VanillaDeckRow(
-                deck: Deck(
-                    name: "Hidden Leaf aggro",
-                    leaderID: leader.id,
-                    cardIDs: Array(
-                        database.cardsPlayable(with: leader)
-                            .flatMap { Array(repeating: $0.id, count: DeckRules.maxCopies) }
-                            .prefix(DeckRules.requiredSize)
-                    )
-                ),
-                leader: leader
+                deck: built,
+                leader: leader,
+                answers: deckChoicePreviewAnswers(in: built, using: database)
             ) { }
 
             if let starter = StarterDecks.all(using: database).first,
                let starterLeader = database.card(id: starter.leaderID) {
-                VanillaDeckRow(deck: starter, leader: starterLeader, isReadyMade: true) { }
+                VanillaDeckRow(
+                    deck: starter,
+                    leader: starterLeader,
+                    answers: deckChoicePreviewAnswers(in: starter, using: database),
+                    isReadyMade: true
+                ) { }
             }
         }
         .padding(Metrics.spacingL)
@@ -298,4 +335,10 @@ private struct VanillaDeckRow: View {
         .background(Palette.backdrop)
         .environment(database)
     }
+}
+
+/// The screen's own answer count, repeated for the row preview — which builds
+/// its decks by hand and so has no screen to ask.
+private func deckChoicePreviewAnswers(in deck: Deck, using database: CardDatabase) -> Int {
+    deck.cardIDs.reduce(0) { $0 + (database.card(id: $1)?.canSetAsSupport == true ? 1 : 0) }
 }

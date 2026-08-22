@@ -241,10 +241,12 @@ struct DeckBuilderView: View {
         importCode.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Support cards in a deck. Chakra is spent only on Support cards and on
-    /// jutsu, so the count is worth seeing before opening the editor.
+    /// Cards in a deck printing a SUPPORT bar. They are the only cards that can
+    /// be set face-down to answer a response window, and the only home chakra
+    /// has besides a jutsu, so the count is worth seeing before opening the
+    /// editor.
     private func supportCount(in deck: Deck) -> Int {
-        deck.cardIDs.reduce(0) { $0 + (database.card(id: $1)?.type == .support ? 1 : 0) }
+        deck.cardIDs.reduce(0) { $0 + (database.card(id: $1)?.canSetAsSupport == true ? 1 : 0) }
     }
 
     /// Drives the delete dialog from the optional deck, so dismissing by any

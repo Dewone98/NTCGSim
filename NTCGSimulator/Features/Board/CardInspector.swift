@@ -2,19 +2,21 @@
 //  CardInspector.swift
 //  NTCGSimulator
 //
-//  The card reader, the contextual controls beneath it, and the picker that
-//  offers a card's printed ability boxes.
+//  The card reader, the contextual controls beneath it, and the offer sheet a
+//  tap on a card in play opens.
 //
 //  The simulator this follows invites you to "hover a card to read it in full";
 //  on a touch screen focus arrives from a tap or a long press instead, so the
 //  same panel doubles as the board's action bar.
 //
-//  Abilities are read here as well as used here. A card prints several boxes,
-//  each with its own trigger and its own price, and some of them the app can
-//  only display rather than resolve. So every box names the moment it answers
-//  to, names what it charges before anything is committed, and says plainly
-//  when the app will not apply all of it — being quietly wrong is the failure
-//  this screen exists to prevent.
+//  Offers are read here as well as used here. A Leader holds up to three at
+//  once — its attack, its Activate: Main and its Recovery — and a body may
+//  hold an attack beside a printed ability. Every offer names the moment it
+//  answers to, names what it charges before anything is committed, and where
+//  it is refused prints the engine's own reason: "Wrong moment", "That card is
+//  rested", "That card cannot attack right now". A control that refuses
+//  silently teaches nothing, and silent rules are the failure this screen
+//  exists to prevent.
 //
 
 import SwiftUI
@@ -23,8 +25,8 @@ import SwiftUI
 
 /// One button in the inspector's action stack.
 ///
-/// The board decides what is offered — mulligan answers, phase controls, a block
-/// response — and hands the buttons over already wired, so the inspector never
+/// The board decides what is offered — mulligan answers, END TURN, Recovery,
+/// a cancel — and hands the buttons over already wired, so the inspector never
 /// needs to know the rules.
 struct BoardAction: Identifiable {
 
@@ -33,8 +35,8 @@ struct BoardAction: Identifiable {
 
     let title: String
 
-    /// Used on a phone, where three buttons share one row and a full title —
-    /// a Leader ability reads "Give a character +2 power" — will not fit.
+    /// Used on a phone, where three buttons share one row and a full title
+    /// will not fit.
     var shortTitle: String? = nil
 
     var style: WideButton.Style = .secondary
@@ -53,72 +55,44 @@ extension CardAbility {
         let moment = trigger.title.isEmpty ? "Passive" : trigger.title
         return cost.isFree ? moment : "\(moment) — \(cost.summary)"
     }
-
-    /// Whether the box asks the player to give cards up out of hand.
-    ///
-    /// `GameAction` carries a target on the board but no choice from hand, so
-    /// the board nominates the card lifted out of the hand strip instead. That
-    /// is worth saying out loud on the button: a step that quietly picks for
-    /// you is exactly what this screen is meant to avoid.
-    var takesCardsFromHand: Bool {
-        effects.contains {
-            if case .placeFromHandOnDeck = $0 { return true }
-            return false
-        }
-    }
 }
 
-// MARK: - Ability offer
+// MARK: - Board offer
 
-/// One printed ability box, offered to the player for activation.
+/// One thing a card in play offers the acting player right now: an attack,
+/// an Activate: Main, or Recovery.
 ///
-/// The board fills these in from the engine's own answers — `legalAbilities`
-/// for the targets, `planAbility` for the refusal — so the picker can never
-/// present an activation the engine would then turn down, and never withholds
-/// one without being able to say why.
-struct AbilityOffer: Identifiable {
+/// The board fills these in from the engine's own validators — `attackBlock`,
+/// `characterAbilityBlock`, `leaderEffectBlock`, `recoveryBlock` — so the
+/// sheet can never present a press the engine would then turn down, and never
+/// withholds one without being able to say why.
+struct BoardOffer: Identifiable {
 
-    /// The card the box is printed on.
-    let source: AbilitySource
+    let id: String
 
-    /// Position in the card's printed order, which is what `GameAction` carries.
-    let index: Int
+    /// The moment and the price on one line — "Attack — rests the Leader",
+    /// "Activate: Main — 1 chakra".
+    let headline: String
 
-    let ability: CardAbility
+    /// What pressing it does, in the card's own printed words where it has
+    /// them.
+    let text: String
 
-    /// Board identities this box may legally be pointed at. Empty when its
-    /// scope asks the player for nothing — and also when nothing legal is on
-    /// the board, which `refusal` is what distinguishes.
-    let targets: Set<UUID>
-
-    /// Why the box cannot be used right now, in the engine's own words.
+    /// Why the offer cannot be taken right now, in the engine's own words.
     /// `nil` when it can.
     let refusal: String?
 
-    var id: String { "\(source.key)-\(index)" }
+    /// Wired by the board. Only ever called while `refusal` is nil.
+    let perform: () -> Void
 
     var isEnabled: Bool { refusal == nil }
 }
 
-/// Every activated box on one card in play, with the standing rules it is under.
-struct AbilityGroup: Identifiable {
-
-    let source: AbilitySource
-    let card: Card
-    let offers: [AbilityOffer]
-
-    /// Passive and "Your Turn" boxes: always in force, never pressed. Shown so
-    /// a player can see the rules governing a card without leaving the board.
-    let standingRules: [CardAbility]
-
-    var id: String { source.key }
-}
-
 // MARK: - Ability box
 
-/// One printed ability box as the player reads it: the trigger and the price on
-/// a headline, the text exactly as printed underneath, and a plain warning when
-/// the app will show the box without resolving all of it.
+/// One printed ability box as the player reads it: the trigger and the price
+/// on a headline, the text exactly as printed underneath, and a plain warning
+/// when the app will show the box without resolving all of it.
 struct AbilityBoxView: View {
 
     let ability: CardAbility
@@ -167,8 +141,9 @@ struct AbilityBoxView: View {
     }
 
     /// The honest line. A box the engine cannot resolve in full is still
-    /// printed on the card, so it is still shown — and marked, because a player
-    /// who is not told what the app skipped cannot settle it themselves.
+    /// printed on the card, so it is still shown — and marked, because a
+    /// player who is not told what the app skipped cannot settle it
+    /// themselves.
     private var partialNote: some View {
         HStack(alignment: .top, spacing: 4) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -194,23 +169,24 @@ struct AbilityBoxView: View {
     }
 }
 
-// MARK: - Ability picker
+// MARK: - Offer sheet
 
-/// The sheet that offers the printed ability boxes on the cards a player holds.
+/// The sheet that offers what one card in play can do right now.
 ///
-/// Every box shows its price before it can be pressed, and a box that cannot be
-/// paid for is disabled with the engine's own reason under it. A control that
-/// refuses silently is worse than one that is not offered at all.
-struct AbilitySheet: View {
+/// Every offer shows its price before it can be pressed, and one that cannot
+/// be taken is disabled with the engine's own reason under it — which is how
+/// a Leader's frozen, rested and already-attacked states are made visible
+/// rather than discovered through a dead tap.
+struct OfferSheet: View {
 
-    /// Named by the board: one card, or everything the player controls.
+    /// The card's name, put there by the board.
     let title: String
 
-    let groups: [AbilityGroup]
+    let offers: [BoardOffer]
 
-    /// A box the player pressed. The board decides whether it resolves at once
-    /// or arms the mat for a target.
-    let onChoose: (AbilityOffer) -> Void
+    /// A chosen offer closes the sheet before it performs; the board owns
+    /// what happens next.
+    let onChoose: (BoardOffer) -> Void
 
     let onDismiss: () -> Void
 
@@ -221,17 +197,17 @@ struct AbilitySheet: View {
             VStack(alignment: .leading, spacing: Metrics.spacingM) {
                 Text(title).screenTitle()
 
-                if groups.isEmpty {
+                if offers.isEmpty {
                     EmptyStatePanel(
-                        headline: "Nothing to activate",
-                        message: "None of the cards you control prints an ability you can use right now."
+                        headline: "Nothing to do",
+                        message: "This card offers nothing the rules allow right now."
                     )
                     Spacer(minLength: 0)
                 } else {
                     ScrollView {
-                        VStack(alignment: .leading, spacing: Metrics.spacingM) {
-                            ForEach(groups) { group in
-                                section(group)
+                        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+                            ForEach(offers) { offer in
+                                row(offer)
                             }
                         }
                         .padding(.bottom, Metrics.spacingS)
@@ -245,101 +221,56 @@ struct AbilitySheet: View {
         }
     }
 
-    // MARK: One card
-
-    private func section(_ group: AbilityGroup) -> some View {
-        VStack(alignment: .leading, spacing: Metrics.spacingS) {
-            header(group)
-
-            ForEach(group.offers) { offer in
-                offerRow(offer)
-            }
-
-            if !group.standingRules.isEmpty {
-                standingRules(group.standingRules)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(Metrics.spacingM)
-        .notchedPanel(fill: Palette.panel.opacity(0.94), stroke: Palette.border)
-    }
-
-    private func header(_ group: AbilityGroup) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: Metrics.spacingS) {
-            Text(group.card.name)
-                .font(Typeface.display(15, weight: .bold))
-                .foregroundStyle(Palette.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Text(group.source.title)
-                .font(Typeface.label(9))
-                .tracking(1.2)
-                .textCase(.uppercase)
-                .foregroundStyle(Palette.accent)
-
-            Spacer(minLength: 0)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    /// One box, pressable when the engine would accept it. The refusal sits
-    /// under the box rather than replacing it, so a player can still read what
-    /// they are being kept from.
-    private func offerRow(_ offer: AbilityOffer) -> some View {
+    /// One offer, pressable when the engine would accept it. The refusal sits
+    /// under the words rather than replacing them, so a player can still read
+    /// what they are being kept from.
+    private func row(_ offer: BoardOffer) -> some View {
         Button {
             onChoose(offer)
         } label: {
             VStack(alignment: .leading, spacing: Metrics.spacingXS) {
-                AbilityBoxView(ability: offer.ability, isOffered: offer.isEnabled)
+                HStack(alignment: .firstTextBaseline, spacing: Metrics.spacingS) {
+                    Text(offer.headline)
+                        .font(Typeface.label(12))
+                        .tracking(1.2)
+                        .textCase(.uppercase)
+                        .foregroundStyle(offer.isEnabled ? Palette.accent : Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+
+                Text(offer.text)
+                    .font(Typeface.body(12))
+                    .foregroundStyle(Palette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 if let refusal = offer.refusal {
-                    footnote(refusal, tint: Palette.negative)
-                } else if offer.ability.target.needsPlayerChoice {
-                    footnote("\(offer.ability.target.prompt) on the board next.",
-                             tint: Palette.textSecondary)
-                }
-
-                if offer.ability.takesCardsFromHand {
-                    footnote(
-                        "The card lifted out of your hand goes back on the deck. Lift one before using this, or the newest card goes.",
-                        tint: Palette.textSecondary
-                    )
+                    Text(refusal)
+                        .font(Typeface.body(11))
+                        .foregroundStyle(Palette.negative)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(Metrics.spacingM)
+            .notchedPanel(
+                notch: 8,
+                fill: offer.isEnabled ? Palette.panelActive : Palette.surface.opacity(0.6),
+                stroke: offer.isEnabled ? Palette.accent : Palette.border
+            )
         }
         .buttonStyle(.plain)
         .disabled(!offer.isEnabled)
         .opacity(offer.isEnabled ? 1 : 0.55)
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(description(of: offer))
+        .accessibilityLabel(spoken(offer))
     }
 
-    private func standingRules(_ rules: [CardAbility]) -> some View {
-        VStack(alignment: .leading, spacing: Metrics.spacingXS) {
-            Text("Always in force").sectionLabel()
-
-            ForEach(Array(rules.enumerated()), id: \.offset) { entry in
-                AbilityBoxView(ability: entry.element)
-            }
-        }
-    }
-
-    private func footnote(_ text: String, tint: Color) -> some View {
-        Text(text)
-            .font(Typeface.body(11))
-            .foregroundStyle(tint)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Metrics.spacingXS)
-    }
-
-    private func description(of offer: AbilityOffer) -> String {
-        var parts = [offer.ability.activationHeadline, offer.ability.text]
-        if offer.ability.oncePerTurn { parts.append("once per turn") }
-        if !offer.ability.isFullyImplemented {
-            parts.append("the app does not apply every step of this box")
-        }
+    private func spoken(_ offer: BoardOffer) -> String {
+        var parts = [offer.headline, offer.text]
         parts.append(offer.refusal ?? "available")
         return parts.joined(separator: ", ")
     }
@@ -367,19 +298,20 @@ struct CardInspector: View {
     /// Height the board reserves for the compact bottom bar.
     static let compactHeight: CGFloat = 146
 
-    /// Width of the card thumbnail in the compact bar. Small enough to leave the
-    /// effect text room, large enough to recognise the art.
+    /// Width of the card thumbnail in the compact bar. Small enough to leave
+    /// the effect text room, large enough to recognise the art.
     private let compactFaceWidth: CGFloat = 46
 
-    /// Buttons that fit side by side on a phone before they stop being readable.
+    /// Buttons that fit side by side on a phone before they stop being
+    /// readable.
     private let compactActionLimit = 3
 
     /// Floor the rules text keeps on the rail.
     ///
-    /// A card's ability boxes are long — several of them, each with its printed
-    /// text — so the reader takes whatever the rail has spare above the action
-    /// stack and scrolls the rest. This is only the height it refuses to give
-    /// up, so the controls can never be pushed off the bottom.
+    /// A card's ability boxes are long — several of them, each with its
+    /// printed text — so the reader takes whatever the rail has spare above
+    /// the action stack and scrolls the rest. This is only the height it
+    /// refuses to give up, so the controls can never be pushed off the bottom.
     private let minimumDetailHeight: CGFloat = 150
 
     var body: some View {
@@ -466,9 +398,9 @@ struct CardInspector: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    // The printed blob and the ability boxes are the same words
-                    // twice — the boxes are that text broken up — so only the
-                    // boxes are shown wherever a card has them.
+                    // The printed blob and the ability boxes are the same
+                    // words twice — the boxes are that text broken up — so
+                    // only the boxes are shown wherever a card has them.
                     if card.abilities.isEmpty, !card.effect.isEmpty {
                         Text(card.effect)
                             .font(Typeface.body(13))
@@ -508,12 +440,10 @@ struct CardInspector: View {
         .notchedPanel(notch: 8, fill: Palette.panelActive, stroke: Palette.accentMuted)
     }
 
-    /// Every box printed on the focused card, in printed order.
-    ///
-    /// This replaces a single invented "Leader ability" line. Real cards print
-    /// several boxes, characters carry them as often as Leaders do, and some of
-    /// them the app can only display — so each box says which of those it is
-    /// rather than leaving the player to find out mid-game.
+    /// Every box printed on the focused card, in printed order. Characters
+    /// carry them as often as Leaders do, and some the app can only display —
+    /// so each box says which of those it is rather than leaving the player
+    /// to find out mid-game.
     private func abilityPanel(_ card: Card) -> some View {
         VStack(alignment: .leading, spacing: Metrics.spacingXS) {
             Text(card.abilities.count == 1 ? "Ability" : "Abilities").sectionLabel()
@@ -527,32 +457,36 @@ struct CardInspector: View {
 
     // MARK: Cost
 
-    /// What the card charges to put into play.
+    /// What each of the card's three modes charges.
     ///
-    /// Summoning is free, so a body's printed number is never presented as a
-    /// price. It is only ever the cost of a Support card or of a jutsu play.
+    /// Summoning is free and so is setting a card face-down, so a body's
+    /// printed number is never presented as a price to put it on the board.
+    /// It is the price of its jutsu, and the chakra on its SUPPORT bar.
     private func playCostText(for card: Card) -> String? {
         switch card.type {
         case .leader, .chakra:
             return nil
-        case .support:
-            return "Play · \(chakraPhrase(card.cost ?? 0))"
         case .summon:
             return "Place · free"
         case .character, .exCharacter:
-            guard let jutsu = card.jutsuCost else { return "Summon · free" }
-            // Two prices, one per line — a middot between them would read as a
-            // single price with two halves.
-            return "Summon · free\nJutsu · \(chakraPhrase(jutsu))"
+            // One price per line — a middot between them would read as a
+            // single price with several halves.
+            var lines = ["Summon · free"]
+            if card.canSetAsSupport {
+                lines.append("Set as support · free")
+                lines.append("Activate to answer · \(chakraPhrase(card.supportFlipCost ?? 0))")
+            }
+            if let jutsu = card.jutsuCost {
+                lines.append("Jutsu · \(chakraPhrase(jutsu))")
+            }
+            return lines.joined(separator: "\n")
         }
     }
 
     /// The same line, condensed for the compact bar's one-line stat readout.
     private func statLine(for card: Card) -> String {
         var parts: [String] = []
-        if card.type.costsChakraToPlay, let cost = card.cost {
-            parts.append("\(cost) chakra")
-        } else if let jutsu = card.jutsuCost {
+        if let jutsu = card.jutsuCost {
             parts.append("jutsu \(jutsu)")
         }
         if let power  = card.power  { parts.append("\(power) power") }
@@ -567,8 +501,8 @@ struct CardInspector: View {
         amount == 0 ? "free" : "\(amount) chakra"
     }
 
-    /// A labelled row rather than an icon, because the rail has the width for it
-    /// and a labelled toggle is the clearer control.
+    /// A labelled row rather than an icon, because the rail has the width for
+    /// it and a labelled toggle is the clearer control.
     private var soundRow: some View {
         Toggle(isOn: $soundEnabled) {
             Text("Sound")
@@ -652,8 +586,9 @@ struct CardInspector: View {
     }
 
     /// The two lines the compact bar has room for. An activated box wins over
-    /// the rest of the card, because it is the part that can be pressed; a card
-    /// with none falls back to its first printed box, then to its effect text.
+    /// the rest of the card, because it is the part that can be pressed; a
+    /// card with none falls back to its first printed box, then to its effect
+    /// text.
     private func compactRulesText(for card: Card) -> String {
         if let ability = card.activatedAbilities.first {
             return "\(ability.activationHeadline). \(ability.text)"
@@ -665,8 +600,8 @@ struct CardInspector: View {
         return card.supportText ?? "No rules text."
     }
 
-    /// Keeps a fixed-height row even with nothing to offer, so the board above
-    /// never shifts when the turn passes.
+    /// Keeps a fixed-height row even with nothing to offer, so the board
+    /// above never shifts when the turn passes.
     @ViewBuilder
     private var compactActions: some View {
         if actions.isEmpty {
@@ -719,33 +654,34 @@ struct CardInspector: View {
 
 // MARK: - Preview support
 
-/// Two cards from the pool dressed as an offer list, so the picker preview does
-/// not need a running game behind it. The second card is refused, because a
+/// A Leader's three offers dressed by hand, so the sheet preview does not
+/// need a running game behind it. The refused rows carry the engine's own
+/// words — `GameError` quotes the reference's block codes — because a
 /// disabled row with its reason under it is the case worth looking at.
-private func previewAbilityGroups(_ database: CardDatabase) -> [AbilityGroup] {
-    let cards = database.cards.filter { !$0.activatedAbilities.isEmpty }.prefix(2)
-
-    return cards.enumerated().map { position, card in
-        let source: AbilitySource = position == 0 ? .leader : .character(UUID())
-        let offers = card.abilities.indices
-            .filter { card.abilities[$0].isActivated }
-            .map { index in
-                AbilityOffer(
-                    source: source,
-                    index: index,
-                    ability: card.abilities[index],
-                    targets: [],
-                    refusal: position == 0 ? nil : "That costs 2 chakra and you have 1 ready."
-                )
-            }
-
-        return AbilityGroup(
-            source: source,
-            card: card,
-            offers: offers,
-            standingRules: card.abilities.filter { $0.trigger == .passive }
+private func previewLeaderOffers() -> [BoardOffer] {
+    [
+        BoardOffer(
+            id: "attack",
+            headline: "Attack — rests the Leader",
+            text: "Declare an attack at the enemy Leader or a rested enemy character. Once per turn.",
+            refusal: nil,
+            perform: {}
+        ),
+        BoardOffer(
+            id: "activate",
+            headline: "Activate: Main — 1 chakra",
+            text: "Flip 1 of your CHAKRA face-down and choose 1 Character: The chosen card gets +3 power during this turn.",
+            refusal: GameError.noChakra(required: 1, available: 0).message,
+            perform: {}
+        ),
+        BoardOffer(
+            id: "recovery",
+            headline: "Recovery — rests the Leader",
+            text: "If it is the second turn or later, rest this card and flip all of your CHAKRA face-up.",
+            refusal: GameError.rested.message,
+            perform: {}
         )
-    }
+    ]
 }
 
 // MARK: - Previews
@@ -757,8 +693,8 @@ private func previewAbilityGroups(_ database: CardDatabase) -> [AbilityGroup] {
         card: database.cards.first { $0.hasSupportLine } ?? database.cards.first,
         isCompact: false,
         actions: [
-            BoardAction(id: "phase", title: "End phase", style: .primary) {},
-            BoardAction(id: "turn", title: "End turn") {}
+            BoardAction(id: "turn", title: "End turn", style: .primary) {},
+            BoardAction(id: "recovery", title: "Recovery") {}
         ],
         soundEnabled: .constant(true),
         onLeave: {}
@@ -776,9 +712,8 @@ private func previewAbilityGroups(_ database: CardDatabase) -> [AbilityGroup] {
         card: database.cards.first { !$0.activatedAbilities.isEmpty } ?? database.cards.first,
         isCompact: false,
         actions: [
-            BoardAction(id: "phase", title: "End phase", style: .primary) {},
-            BoardAction(id: "ability", title: "Use an ability", shortTitle: "Abilities") {},
-            BoardAction(id: "turn", title: "End turn") {}
+            BoardAction(id: "turn", title: "End turn", style: .primary) {},
+            BoardAction(id: "pass", title: "Pass") {}
         ],
         soundEnabled: .constant(true),
         onLeave: {}
@@ -789,23 +724,21 @@ private func previewAbilityGroups(_ database: CardDatabase) -> [AbilityGroup] {
     .environment(database)
 }
 
-#Preview("Ability picker") {
-    let database = CardDatabase()
-
-    AbilitySheet(
-        title: "Abilities",
-        groups: previewAbilityGroups(database),
+#Preview("Leader offers") {
+    OfferSheet(
+        title: "Naruto Uzumaki",
+        offers: previewLeaderOffers(),
         onChoose: { _ in },
         onDismiss: {}
     )
-    .environment(database)
+    .environment(CardDatabase())
 }
 
 #Preview("Compact bar") {
     let database = CardDatabase()
 
     CardInspector(
-        card: database.cards.first { $0.type == .support } ?? database.cards.first,
+        card: database.cards.first(where: \.canSetAsSupport) ?? database.cards.first,
         isCompact: true,
         actions: [
             BoardAction(id: "keep", title: "Keep this hand", style: .primary) {},

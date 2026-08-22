@@ -7,6 +7,15 @@
 //  touches `GameState` — every decision goes through `engine.apply(_:by:)` and
 //  every refusal comes back as copy the engine already wrote.
 //
+//  Three rules shape everything below. Leaders attack, once per turn, resting
+//  themselves — so a Leader carries the same attack affordance a body does, with
+//  its frozen, rested and already-attacked states on the mat rather than behind
+//  a dead tap. An attack may only be aimed at the enemy Leader or a RESTED enemy
+//  character, and there is no blocking at all, so a declaration is answered from
+//  the Support row and nowhere else. And a response window offers exactly what
+//  the engine would accept into it — a "Support Activated" card never lights up
+//  for a bare summon, because the chain it answers is empty.
+//
 
 import SwiftUI
 
@@ -39,7 +48,8 @@ struct BoardLayout: Equatable {
 
     // MARK: Proportions
 
-    /// Slots in the Characters and Support rows.
+    /// Slots printed in the Characters and Support rows. The Characters row
+    /// itself is unbounded and scrolls past this once effects flood it.
     private static let columns: CGFloat = 5
 
     /// The Leader is printed slightly larger than the bodies it anchors.
@@ -215,6 +225,7 @@ struct GameBoardView: View {
 
     @Environment(CardDatabase.self) private var database
     @Environment(DeckStore.self) private var decks
+    @Environment(SettingsStore.self) private var settings
 
     @State private var engine: GameEngine?
 
@@ -249,7 +260,8 @@ struct GameBoardView: View {
             configuration: configuration,
             database: database,
             decks: decks,
-            seed: Self.timeSeed()
+            seed: Self.timeSeed(),
+            autoPass: settings.autoPass
         )
         gameIndex += 1
     }
@@ -282,14 +294,20 @@ private struct BoardStage: View {
     /// The hand index lifted out of the strip.
     @State private var selectedHandIndex: Int?
 
-    /// The attacker waiting for a target.
-    @State private var selectedAttacker: UUID?
+    /// The Leader or body armed as the attacker, waiting for a target. The
+    /// Leader attacks like any other card, so this is a reference rather than
+    /// an identity.
+    @State private var armedAttacker: AttackerReference?
 
-    /// A printed ability box the player has chosen, waiting for its target.
-    @State private var armedAbility: ArmedAbility?
+    /// Option keys staged for a board-picked prompt, in the order tapped.
+    @State private var stagedChoiceKeys: [String] = []
 
-    /// The card, or the whole side, whose ability boxes are being offered.
-    @State private var abilityMenu: AbilityMenu?
+    /// The card in play whose offers are being read.
+    @State private var offerSheet: OfferSource?
+
+    /// The hand card whose action panel is open: SUMMON, SET AS SUPPORT and
+    /// ACTIVATE …, each either offered or refused with the engine's reason.
+    @State private var handPanel: HandCard?
 
     /// A decision held back until the player confirms it.
     @State private var confirmation: BoardConfirmation?
@@ -305,9 +323,6 @@ private struct BoardStage: View {
 
     /// Long enough to watch a move land, short enough not to feel like a stall.
     private static let aiDelay: Duration = .seconds(0.7)
-
-    /// The end step has nothing to decide, so auto-pass barely pauses.
-    private static let autoPassDelay: Duration = .seconds(0.3)
 
     var body: some View {
         GeometryReader { geo in
@@ -330,15 +345,43 @@ private struct BoardStage: View {
             .frame(width: geo.size.width, height: geo.size.height)
         }
         .overlay(alignment: .top) { bannerView }
+        .overlay(alignment: .bottom) { responsePanel }
         .overlay { resultOverlay }
-        .sheet(item: $abilityMenu) { menu in
-            AbilitySheet(
-                title: abilityMenuTitle(menu),
-                groups: abilityGroups(menu),
-                onChoose: { choose($0) },
-                onDismiss: { abilityMenu = nil }
+        .sheet(item: $handPanel) { handCard in
+            HandActionPanel(
+                handCard: handCard,
+                availableChakra: engine.availableChakra(for: nearSlot),
+                asksToConfirm: settings.confirmJutsuSummon,
+                onChoose: { option in
+                    handPanel = nil
+                    play(handCard, mode: option.mode)
+                },
+                onDismiss: { handPanel = nil }
             )
             .presentationDetents([.medium, .large])
+        }
+        .sheet(item: $offerSheet) { source in
+            OfferSheet(
+                title: offerTitle(source),
+                offers: offers(for: source),
+                onChoose: { offer in
+                    offerSheet = nil
+                    offer.perform()
+                },
+                onDismiss: { offerSheet = nil }
+            )
+            .presentationDetents([.medium, .large])
+        }
+        .sheet(item: listChoiceBinding) { choice in
+            ChoicePanel(
+                choice: choice,
+                title: choiceTitle(choice),
+                subtitle: choiceCardName,
+                onResolve: { keys in resolveChoice(keys: keys) },
+                onCancel: choice.cancellable ? { resolveChoice(keys: []) } : nil
+            )
+            .presentationDetents([.medium, .large])
+            .interactiveDismissDisabled()
         }
         .sheet(isPresented: $showsJournal) {
             JournalSheet(journal: engine.journal) { showsJournal = false }
@@ -355,6 +398,9 @@ private struct BoardStage: View {
         }
         .task(id: revision) { await advanceAutomation() }
         .task(id: banner?.id) { await fadeBanner() }
+        // The engine is Foundation-only and holds its own copy of the one
+        // setting the rules care about, so the board keeps the two in step.
+        .task(id: settings.autoPass) { engine.autoPass = settings.autoPass }
     }
 
     // MARK: Layouts
@@ -418,33 +464,48 @@ private struct BoardStage: View {
             chakraFace: chakraFace,
             onRead: { focusedCard = $0 },
             onSelectCharacter: { tapCharacter($0, on: slot) },
-            onSelectLeader: { tapLeader(of: slot) }
+            onSelectLeader: { tapLeader(of: slot) },
+            onSelectSupport: { tapSupport(at: $0, on: slot) }
         )
         .frame(height: layout.sideHeight)
     }
 
     private func statusBar(_ layout: BoardLayout) -> some View {
         BoardStatusBar(
-            phase: engine.phase,
+            turnState: engine.turnState,
             turnNumber: engine.turnNumber,
             prompt: prompt,
             activePlayer: displayName(for: engine.currentPlayer),
             isCompact: layout.isCompact,
+            hasSummoned: engine.hasSummonedThisTurn(engine.currentPlayer),
             journalCount: engine.journal.count,
             onShowJournal: layout.isCompact ? { showsJournal = true } : nil,
-            onCancelTargeting: armedAbility == nil ? nil : { cancelAbility() }
+            onCancelTargeting: cancelTargetingAction
         )
     }
 
-    /// The hand dims whole while an ability is choosing a target — the only
-    /// tap the board wants next is on a character.
+    /// Whether the hand is the thing the board is waiting on.
+    ///
+    /// A prompt and an armed attacker each own the next tap, so the strip greys
+    /// out rather than opening a panel on top of them. A response window does
+    /// not: the active player may answer their own attack's window with a jutsu
+    /// straight from hand, and the panel names the refusal when they may not.
+    private var handIsLive: Bool {
+        guard !engine.isFinished, isHumanControlled(nearSlot) else { return false }
+        guard engine.pendingChoice == nil, armedAttacker == nil else { return false }
+        guard !engine.isAwaitingMulligan else { return false }
+        if let window = engine.responseWindow { return window.respondingSlot == nearSlot }
+        return nearSlot == engine.currentPlayer
+    }
+
+    /// The hand dims whole while something else owns the next tap — an armed
+    /// attacker, or a prompt waiting on an answer.
     private func hand(_ layout: BoardLayout) -> some View {
         HandView(
             cards: engine.handCards(for: nearSlot),
             cardWidth: layout.handCardWidth,
-            availableChakra: engine.availableChakra(for: nearSlot),
             selectedIndex: selectedHandIndex,
-            isInteractive: isHumanControlled(nearSlot) && armedAbility == nil,
+            isInteractive: handIsLive,
             emptyMessage: "\(displayName(for: nearSlot)) has no cards in hand.",
             onPlay: { tapHandCard($0) },
             onRead: { handCard in
@@ -470,31 +531,20 @@ private struct BoardStage: View {
     /// The half drawn at the bottom.
     ///
     /// Solo v Self hands the device back and forth, so the side being asked for
-    /// a decision is always the one the right way up — including the blocker,
-    /// who is not the player taking the turn.
+    /// a decision is always the one the right way up — the priority holder in a
+    /// window and the answering player during a prompt included.
     private var nearSlot: PlayerSlot {
         guard configuration.mode != .versusAI else { return .player }
-        if engine.isAwaitingMulligan {
-            return engine.state.needsMulligan(.player) ? .player : .opponent
-        }
-        if let blocking = engine.blockingPlayer { return blocking }
-        return engine.currentPlayer
+        return engine.decider ?? engine.currentPlayer
     }
 
     private var farSlot: PlayerSlot { nearSlot.opposing }
 
     /// The side that may act right now and is the person holding the device.
-    ///
-    /// Usually whoever is taking the turn — but a declared attack hands the
-    /// next decision to the defender, and their "During Your Opponent's Attack"
-    /// boxes belong to them rather than to the attacker. Everything the board
-    /// offers is addressed to this side.
+    /// Everything the board offers is addressed to this side.
     private var actingSlot: PlayerSlot? {
-        guard !engine.isFinished, !engine.isAwaitingMulligan else { return nil }
-        if let blocking = engine.blockingPlayer {
-            return isHumanControlled(blocking) ? blocking : nil
-        }
-        return isHumanControlled(engine.currentPlayer) ? engine.currentPlayer : nil
+        guard !engine.isFinished, let decider = engine.decider else { return nil }
+        return isHumanControlled(decider) ? decider : nil
     }
 
     /// Only the AI opponent plays itself.
@@ -529,237 +579,641 @@ private struct BoardStage: View {
     private var prompt: String {
         if engine.isFinished { return engine.outcome.summary }
 
-        if engine.isAwaitingMulligan {
-            return "\(displayName(for: nearSlot)): keep this hand, or draw a new one."
+        if let awaiting = engine.state.awaitingMulligan {
+            return isHumanControlled(awaiting)
+                ? "\(displayName(for: awaiting)): keep this hand, or draw a new one."
+                : "\(displayName(for: awaiting)) is settling their opening hand."
         }
 
-        // A chosen ability owns the board until it is pointed at something, so
-        // its own prompt outranks whatever the turn would otherwise be asking.
-        if let armed = armedAbility {
-            return "\(armed.card.name) — \(armed.ability.target.prompt.lowercased()), or cancel."
+        // An open prompt outranks the turn it interrupts.
+        if let choice = engine.pendingChoice {
+            guard isHumanControlled(choice.player) else {
+                return "\(displayName(for: choice.player)) is choosing."
+            }
+            guard choice.maxSelections > 1 else { return choice.prompt }
+            return "\(choice.prompt) Up to \(choice.maxSelections), then confirm."
         }
 
-        if let blocking = engine.blockingPlayer {
-            return isHumanControlled(blocking)
-                ? "Choose a blocker, take the attack on your Leader, or answer with an ability."
-                : "\(displayName(for: blocking)) is deciding whether to block."
+        // An armed attacker owns the mat until it is pointed at something.
+        if let armed = armedAttacker {
+            return "\(attackerName(armed)) is attacking — choose the enemy Leader "
+                + "or a rested character, or cancel."
+        }
+
+        if let window = engine.responseWindow {
+            let who = displayName(for: window.respondingSlot)
+            return isHumanControlled(window.respondingSlot)
+                ? "\(who): \(window.prompt.lowercased()), or pass."
+                : "\(who) may answer with a face-down card."
         }
 
         guard isHumanControlled(engine.currentPlayer) else {
             return "\(displayName(for: engine.currentPlayer)) is taking their turn."
         }
 
-        switch engine.phase {
-        case .main:
-            return "Play cards from your hand, then move to the attack phase."
-        case .attack:
-            return selectedAttacker == nil
-                ? "Choose a character to attack with, or end the phase."
-                : "Choose a target, or tap the attacker again to change your mind."
-        case .end:
-            return "End the turn to pass to \(displayName(for: engine.currentPlayer.opposing))."
-        case .refresh, .draw:
-            return "Refreshing chakra and drawing."
-        }
+        // The reference's own words, and the whole of the turn: no phases, no
+        // order, one control to leave it by.
+        return "\(TurnState.acting.prompt)."
     }
 
     // MARK: Emphasis
 
+    /// What one side should light up right now. Every set is read back off the
+    /// engine's own validators, so a lit card is one `apply` will accept.
     private func emphasis(for slot: PlayerSlot) -> BoardEmphasis {
         var value = BoardEmphasis()
-        guard let acting = actingSlot else { return value }
 
-        // A chosen ability owns the mat until it is pointed at something.
-        if let armed = armedAbility {
-            value.isTargeting = true
-            // Identities are unique across the whole board, so both sides can
-            // be handed the same set and each will only find its own.
-            value.abilityTargets = armed.targets
-            if slot == acting {
-                value.armedSource = armed.source
-                value.leaderAbilityNote = armed.source == .leader ? "Choosing a target" : nil
+        if let choice = engine.pendingChoice, isHumanControlled(choice.player) {
+            value.isChoosing = true
+            for option in choice.options {
+                mark(option.target, on: slot, staged: false, into: &value)
+            }
+            for key in stagedChoiceKeys {
+                guard let option = choice.option(forKey: key) else { continue }
+                mark(option.target, on: slot, staged: true, into: &value)
             }
             return value
         }
 
-        // Only the acting side has anything to activate, so only it pays for
-        // the engine's legality walk.
-        if slot == acting {
-            let marks = abilityMarks(for: acting)
-            value.readyAbilities = Set(marks.ready.keys)
-            value.spentAbilities = marks.spent
-            value.partialAbilities = marks.partial
-            value.leaderAbilityNote = leaderAbilityNote(marks, for: acting)
-        }
+        guard let acting = actingSlot else { return value }
 
-        if let blocking = engine.blockingPlayer {
-            value.blockers = slot == blocking
+        // A window belongs to the responder alone: nothing else on the mat is
+        // being asked for, so only their answerable Supports light up.
+        if let window = engine.responseWindow {
+            if slot == window.respondingSlot, slot == acting {
+                value.answerableSupports = activatableSupportSlots(for: slot)
+            }
             return value
         }
 
-        guard engine.phase == .attack else { return value }
-
         if slot == acting {
-            value.attackers = true
-            value.selected = selectedAttacker
-        } else if selectedAttacker != nil {
-            value.targets = true
-            value.leaderIsTarget = true
+            value.answerableSupports = activatableSupportSlots(for: slot)
+            value.attackers = Set(
+                engine.side(slot).characters
+                    .filter { engine.attackBlock(attacker: .character($0.id), by: slot) == nil }
+                    .map(\.id)
+            )
+            value.leaderMayAttack = engine.attackBlock(attacker: .leader, by: slot) == nil
+
+            let marks = abilityMarks(for: slot)
+            value.readyAbilities = marks.ready
+            value.spentAbilities = marks.spent
+            value.leaderAbilityReady = engine.leaderEffectBlock(for: slot) == nil
+                || engine.recoveryBlock(for: slot) == nil
+            value.leaderNote = leaderNote(mayAttack: value.leaderMayAttack,
+                                          abilityReady: value.leaderAbilityReady)
+
+            switch armedAttacker {
+            case .character(let id): value.selectedAttackerID = id
+            case .leader:            value.leaderIsSelectedAttacker = true
+            case nil:                break
+            }
+            return value
+        }
+
+        // The far side is only ever a set of targets, and only once an attacker
+        // is armed. Standing characters are not among them.
+        if let armed = armedAttacker {
+            value.isTargetingAttack = true
+            value.attackTargets = Set(
+                engine.side(slot).characters
+                    .filter { engine.canAttack(attacker: armed, target: .character($0.id), by: acting) }
+                    .map(\.id)
+            )
+            value.leaderIsAttackTarget = engine.canAttack(attacker: armed, target: .leader, by: acting)
         }
         return value
     }
 
+    /// Records one prompt option against the side it belongs to.
+    private func mark(
+        _ target: ChoiceTarget,
+        on slot: PlayerSlot,
+        staged: Bool,
+        into value: inout BoardEmphasis
+    ) {
+        switch target {
+        case .character(let id):
+            guard engine.side(slot).character(id: id) != nil else { return }
+            if staged { value.stagedTargets.insert(id) } else { value.choiceTargets.insert(id) }
+        case .leader(let owner):
+            guard owner == slot else { return }
+            if staged { value.leaderIsStaged = true } else { value.leaderIsChoiceTarget = true }
+        case .handCard, .trashCard, .deckCard:
+            return
+        }
+    }
+
+    /// The Support slots the engine would accept an activation from right now —
+    /// its own legality, so a "Support Activated" card stays dark in a summon
+    /// window and lights the moment a chain exists.
+    private func activatableSupportSlots(for slot: PlayerSlot) -> Set<Int> {
+        Set(
+            engine.side(slot).faceDownSupports
+                .filter { engine.slotActivationBlock(slotIndex: $0.slotIndex, by: slot) == nil }
+                .map(\.slotIndex)
+        )
+    }
+
+    /// Which bodies can activate a printed box now, and which have spent one.
+    private func abilityMarks(for slot: PlayerSlot) -> (ready: Set<UUID>, spent: Set<UUID>) {
+        var ready: Set<UUID> = []
+        var spent: Set<UUID> = []
+        for character in engine.side(slot).characters {
+            guard let card = engine.card(for: character),
+                  card.abilities.contains(where: { $0.trigger == .activateMain }) else { continue }
+            if engine.characterAbilityBlock(character.id, by: slot) == nil {
+                ready.insert(character.id)
+            } else if character.activatedThisTurn {
+                spent.insert(character.id)
+            }
+        }
+        return (ready, spent)
+    }
+
+    /// The line drawn under the Leader, naming what it is offering.
+    ///
+    /// Only offers: the states holding a Leader back — frozen, rested, its one
+    /// attack spent — are already worn as chips beside the card, and saying
+    /// them twice on a phone-sized column reads as two different facts.
+    private func leaderNote(mayAttack: Bool, abilityReady: Bool) -> String? {
+        if mayAttack && abilityReady { return "Attack and ability ready" }
+        if mayAttack { return "Attack ready" }
+        if abilityReady { return "Ability ready" }
+        return nil
+    }
+
+    // MARK: Response window
+
+    /// The window, drawn over the bottom of the board while it is this player's
+    /// to answer.
+    ///
+    /// It is an overlay rather than a sheet because the mat is the other half of
+    /// the decision: the attack or the summon being answered is on it, and a
+    /// sheet would hide exactly the thing the player is deciding about.
+    @ViewBuilder
+    private var responsePanel: some View {
+        if let window = engine.responseWindow,
+           engine.pendingChoice == nil,
+           isHumanControlled(window.respondingSlot),
+           window.respondingSlot == nearSlot,
+           !engine.isFinished {
+            ResponseWindowPanel(
+                window: window,
+                subject: responseSubject(window),
+                answers: responseAnswers(for: window.respondingSlot),
+                availableChakra: engine.availableChakra(for: window.respondingSlot),
+                isCompact: horizontalSizeClass == .compact,
+                onActivate: { answer in activate(answer, by: window.respondingSlot) },
+                onPass: { perform(.passCounter, by: window.respondingSlot) }
+            )
+            .padding(Metrics.spacingS)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    /// One sentence naming what the window is holding up, so the player knows
+    /// what they are answering before they spend anything.
+    private func responseSubject(_ window: ResponseWindow) -> String {
+        if let attack = engine.pendingAttack {
+            let attacker = name(of: attack.attacker, on: attack.attackingSlot)
+            let target: String
+            switch attack.target {
+            case .leader:
+                target = "\(displayName(for: attack.defendingSlot))'s Leader"
+            case .character(let id):
+                target = engine.locateCharacter(id: id)
+                    .flatMap { engine.card(for: $0.character)?.name } ?? "a rested character"
+            }
+            return "\(attacker) is attacking \(target)."
+        }
+
+        if let link = engine.state.chain.last {
+            let name = engine.card(for: link.cardID)?.name ?? link.cardID
+            let depth = window.chainLength == 1 ? "1 card" : "\(window.chainLength) cards"
+            return "\(displayName(for: link.player)) activated \(name). \(depth) on the chain."
+        }
+
+        // A summon window: the body that just arrived is the last one placed.
+        let summoner = window.respondingSlot.opposing
+        let arrival = engine.side(summoner).characters.last
+            .flatMap { engine.card(for: $0)?.name }
+        return arrival.map { "\(displayName(for: summoner)) summoned \($0)." }
+            ?? "\(displayName(for: summoner)) summoned a character."
+    }
+
+    /// Everything this player could answer the window with: their face-down
+    /// Supports, each with the engine's reason when it is refused, and — for
+    /// the active player, who alone may play from hand — the jutsu in hand the
+    /// engine would accept right now.
+    private func responseAnswers(for slot: PlayerSlot) -> [ResponseAnswer] {
+        var answers = engine.faceDownSupports(for: slot).map { support in
+            ResponseAnswer(
+                origin: .slot(support.slotIndex),
+                card: support.card,
+                ability: support.ability,
+                chakraCost: support.chakraCost,
+                refusal: engine.slotActivationBlock(slotIndex: support.slotIndex, by: slot)?.message
+            )
+        }
+
+        for handCard in engine.handCards(for: slot) {
+            guard let bar = handCard.card.supportBarAbility,
+                  engine.handActivationBlock(handIndex: handCard.id, by: slot) == nil else { continue }
+            answers.append(
+                ResponseAnswer(
+                    origin: .hand(handCard.id),
+                    card: handCard.card,
+                    ability: bar.ability,
+                    chakraCost: bar.ability.cost.chakra,
+                    refusal: nil
+                )
+            )
+        }
+        return answers
+    }
+
+    private func activate(_ answer: ResponseAnswer, by slot: PlayerSlot) {
+        switch answer.origin {
+        case .slot(let index):
+            perform(.activateSupport(slotIndex: index), by: slot)
+        case .hand(let index):
+            perform(.activateSupportFromHand(handIndex: index), by: slot)
+        }
+    }
+
     // MARK: Taps
 
-    /// A hand tap plays the card. An unplayable card still lands in the reader,
-    /// and the engine's own refusal explains why nothing happened.
+    /// A hand tap opens the card's action panel: SUMMON, SET AS SUPPORT and
+    /// ACTIVATE …, each with the reason it is refused when it is refused. An
+    /// unplayable card still lands in the reader.
     private func tapHandCard(_ handCard: HandCard) {
         focusedCard = handCard.card
         selectedHandIndex = handCard.id
 
-        // An armed ability owns the next tap. Reading the card is still useful,
-        // so the tap lands in the reader and the board explains the rest.
-        if let armed = armedAbility {
-            show("\(armed.ability.target.prompt) for \(armed.card.name), or cancel it first.")
+        if engine.pendingChoice != nil {
+            show("Answer the open prompt first.")
+            return
+        }
+        if let armed = armedAttacker {
+            show("\(attackerName(armed)) is waiting for a target, or cancel it first.")
             return
         }
 
-        // Only a body can be either summoned or spent — a Support card played
-        // through its own line has nothing to choose between.
-        let wantsChoice = settings.confirmJutsuSummon
-            && handCard.card.type.isBody
-            && handCard.card.hasSupportLine
-            && handCard.isPlayable
-        if wantsChoice {
-            confirmation = .jutsu(handCard)
-            return
-        }
-        play(handCard)
+        // The reference opens the action panel every time a card is selected,
+        // refused modes included: "Summon already used this turn" is a rule a
+        // player can only learn by reading it against the button it refuses.
+        // It opens only while the hand is the board's to play from, though —
+        // the modes are worked out from the printed rules, and a finished game
+        // is not a moment any of them answer to.
+        guard handIsLive else { return }
+        handPanel = handCard
     }
 
-    /// Summons where it can and falls back to the support line where it cannot —
-    /// a full Characters row should not make a jutsu unplayable.
-    private func play(_ handCard: HandCard, asJutsu: Bool? = nil) {
-        if let asJutsu {
-            perform(.playCard(handIndex: handCard.id, asJutsu: asJutsu), by: nearSlot)
-            return
+    /// Commits a play. Targets are picked by the engine's own prompts once the
+    /// activation is on the chain, so the board never has to arm the mat first.
+    private func play(_ handCard: HandCard, mode: CardPlayMode) {
+        switch mode {
+        case .summon:       perform(.summon(handIndex: handCard.id), by: nearSlot)
+        case .setAsSupport: perform(.setSupport(handIndex: handCard.id), by: nearSlot)
+        case .jutsu:        perform(.activateSupportFromHand(handIndex: handCard.id), by: nearSlot)
         }
-
-        if case .failure(let error) = engine.planPlay(handIndex: handCard.id, asJutsu: false, by: nearSlot) {
-            if handCard.card.hasSupportLine,
-               case .success = engine.planPlay(handIndex: handCard.id, asJutsu: true, by: nearSlot) {
-                perform(.playCard(handIndex: handCard.id, asJutsu: true), by: nearSlot)
-            } else {
-                show(error.message)
-            }
-            return
-        }
-        perform(.playCard(handIndex: handCard.id, asJutsu: false), by: nearSlot)
     }
 
     private func tapCharacter(_ character: CharacterInPlay, on slot: PlayerSlot) {
         if let card = engine.card(for: character) { focusedCard = card }
 
-        if let armed = armedAbility {
-            // Tapping the card that asked the question is the way back out.
-            guard armed.source != .character(character.id) else {
-                cancelAbility()
+        if engine.pendingChoice != nil {
+            chooseFromBoard(.character(character.id))
+            return
+        }
+
+        // An open window is answered from the Support row, never from a body.
+        guard engine.responseWindow == nil else { return }
+        guard let acting = actingSlot else { return }
+
+        if let armed = armedAttacker {
+            guard slot != acting else {
+                // Tapping the armed body again is the way back out.
+                if case .character(let id) = armed, id == character.id { cancelTargeting() }
                 return
             }
-            guard armed.targets.contains(character.id) else {
-                show(GameError.abilityNeedsTarget.message)
+            guard engine.canAttack(attacker: armed, target: .character(character.id), by: acting) else {
+                show("Only the enemy Leader and rested characters can be attacked.")
                 return
             }
-            requestAbility(
-                armed,
-                targetID: character.id,
+            requestAttack(
+                attacker: armed,
+                target: .character(character.id),
                 targetName: engine.card(for: character)?.name ?? "that character"
             )
             return
         }
 
-        if let blocking = engine.blockingPlayer {
-            guard isHumanControlled(blocking), slot == blocking else { return }
-            guard engine.canBlock(characterID: character.id) else {
-                show(GameError.blockerUnavailable.message)
-                return
-            }
-            perform(.declareBlock(blockerID: character.id), by: blocking)
+        guard slot == acting else {
+            show("Choose one of your cards to attack with first.")
             return
         }
 
-        guard let acting = actingSlot else { return }
-
-        // Outside the attack phase a card you control is its own ability
-        // button. Inside it, the tap already means "attack with this".
-        guard engine.phase == .attack else {
-            if slot == acting { openAbilities(for: .character(character.id), on: acting) }
-            return
-        }
-
-        if slot == acting {
-            guard engine.canAttack(characterID: character.id, by: slot) else {
-                show(GameError.attackerUnavailable.message)
-                return
-            }
+        // With no attack phase to be in, a body that can swing answers a tap as
+        // "attack with this". One that cannot opens its offers instead.
+        if engine.attackBlock(attacker: .character(character.id), by: slot) == nil {
             withAnimation(.easeOut(duration: 0.15)) {
-                selectedAttacker = selectedAttacker == character.id ? nil : character.id
+                armedAttacker = .character(character.id)
             }
             return
         }
-
-        guard let attackerID = selectedAttacker else {
-            show("Choose one of your characters to attack with first.")
-            return
-        }
-        requestAttack(
-            attackerID: attackerID,
-            target: .character(character.id),
-            targetName: engine.card(for: character)?.name ?? "that character"
-        )
+        offerSheet = .character(character.id)
     }
 
+    /// A tap on a Support slot.
+    ///
+    /// A face-down card the engine would accept is activated on the spot — that
+    /// is how a window is answered and how a "During Your Main" jutsu is played
+    /// from the mat. Otherwise the tap reads the card, which on your own side is
+    /// how you check what you set.
+    private func tapSupport(at slotIndex: Int, on slot: PlayerSlot) {
+        let supports = engine.side(slot).supports
+        guard supports.indices.contains(slotIndex), let placed = supports[slotIndex] else { return }
+
+        if let card = engine.card(for: placed), placed.isRevealed || slot == nearSlot {
+            focusedCard = card
+        }
+
+        guard engine.pendingChoice == nil, isHumanControlled(slot), slot == actingSlot else { return }
+
+        switch engine.slotActivationBlock(slotIndex: slotIndex, by: slot) {
+        case nil:
+            perform(.activateSupport(slotIndex: slotIndex), by: slot)
+        case .some(let error):
+            // A window is where a refusal is worth reading; outside one a
+            // face-down card is usually just being checked.
+            if engine.responseWindow != nil { show(error.message) }
+        }
+    }
+
+    /// A tap on a Leader. It is a card in play like any other now: it attacks,
+    /// it prints boxes, and on the far side it is always a legal attack target.
     private func tapLeader(of slot: PlayerSlot) {
         if let leader = engine.leaderCard(for: slot) { focusedCard = leader }
 
-        if let armed = armedAbility {
-            if armed.source == .leader, slot == actingSlot {
-                cancelAbility()
-            } else {
-                show(GameError.abilityNeedsTarget.message)
+        if engine.pendingChoice != nil {
+            chooseFromBoard(.leader(slot))
+            return
+        }
+
+        guard engine.responseWindow == nil, let acting = actingSlot else { return }
+
+        if let armed = armedAttacker {
+            guard slot != acting else {
+                if case .leader = armed { cancelTargeting() }
+                return
             }
+            requestAttack(
+                attacker: armed,
+                target: .leader,
+                targetName: engine.leaderCard(for: slot)?.name ?? "the Leader"
+            )
             return
         }
 
-        // Your own Leader is a card in play like any other: it prints ability
-        // boxes and a tap offers them. Nothing else on the mat wants that tap,
-        // because a Leader in this engine never attacks and never blocks. The
-        // enemy Leader is only ever an attack target.
-        if let acting = actingSlot, slot == acting {
-            openAbilities(for: .leader, on: acting)
+        guard slot == acting else {
+            show("Choose one of your cards to attack with first.")
             return
         }
-
-        guard engine.blockingPlayer == nil,
-              let acting = actingSlot,
-              engine.phase == .attack,
-              slot != acting,
-              let attackerID = selectedAttacker
-        else { return }
-
-        requestAttack(
-            attackerID: attackerID,
-            target: .leader,
-            targetName: engine.leaderCard(for: slot)?.name ?? "the Leader"
-        )
+        offerSheet = .leader
     }
 
-    private func requestAttack(attackerID: UUID, target: AttackTarget, targetName: String) {
+    private func requestAttack(attacker: AttackerReference, target: AttackTarget, targetName: String) {
         guard settings.targetConfirm == .askMe else {
-            perform(.attack(attackerID: attackerID, target: target), by: engine.currentPlayer)
+            perform(.declareAttack(attacker: attacker, target: target), by: engine.currentPlayer)
             return
         }
-        confirmation = .attack(attackerID: attackerID, target: target, targetName: targetName)
+        confirmation = .attack(attacker: attacker, target: target, targetName: targetName)
+    }
+
+    /// Backs out of the armed attacker.
+    private func cancelTargeting() {
+        withAnimation(.easeOut(duration: 0.15)) { armedAttacker = nil }
+    }
+
+    /// The cancel the status band offers, when there is something to back out
+    /// of: an armed attacker, or targets staged for a prompt.
+    private var cancelTargetingAction: (() -> Void)? {
+        if armedAttacker != nil { return { cancelTargeting() } }
+        if !stagedChoiceKeys.isEmpty { return { stagedChoiceKeys.removeAll() } }
+        return nil
+    }
+
+    // MARK: Prompts
+
+    /// The open prompt, when it is this player's and picked from the mat.
+    private var boardChoice: PendingChoice? {
+        guard let choice = engine.pendingChoice, isHumanControlled(choice.player) else { return nil }
+        return isBoardPicked(choice) ? choice : nil
+    }
+
+    /// The open prompt, when it is this player's and picked from a hidden zone —
+    /// hand, deck or trash — which the mat cannot show.
+    private var listChoice: PendingChoice? {
+        guard let choice = engine.pendingChoice, isHumanControlled(choice.player) else { return nil }
+        return isBoardPicked(choice) ? nil : choice
+    }
+
+    /// Sheets need a binding; a prompt is dismissed by answering it, never by
+    /// swiping it away, so the setter deliberately does nothing.
+    private var listChoiceBinding: Binding<PendingChoice?> {
+        Binding(get: { listChoice }, set: { _ in })
+    }
+
+    /// A prompt every option of which points at a card in play.
+    private func isBoardPicked(_ choice: PendingChoice) -> Bool {
+        choice.options.allSatisfy { option in
+            switch option.target {
+            case .character, .leader:            return true
+            case .handCard, .trashCard, .deckCard: return false
+            }
+        }
+    }
+
+    /// A tap on the mat while a board-picked prompt is open.
+    ///
+    /// One pick resolves at once when the player asked for that, and stages for
+    /// confirmation otherwise; a multi-target lock always stages, because the
+    /// whole answer travels in one action.
+    private func chooseFromBoard(_ target: ChoiceTarget) {
+        guard let choice = boardChoice else { return }
+        guard let option = choice.options.first(where: { $0.target == target }) else {
+            show("That is not one of the offered options.")
+            return
+        }
+
+        if let index = stagedChoiceKeys.firstIndex(of: option.key) {
+            stagedChoiceKeys.remove(at: index)
+            return
+        }
+
+        guard choice.maxSelections > 1 || settings.targetConfirm == .askMe else {
+            resolveChoice(keys: [option.key])
+            return
+        }
+
+        withAnimation(.easeOut(duration: 0.15)) {
+            if stagedChoiceKeys.count >= choice.maxSelections { stagedChoiceKeys.removeFirst() }
+            stagedChoiceKeys.append(option.key)
+        }
+        // A single-target prompt the player asked to confirm still resolves from
+        // the reader's CONFIRM button, so nothing is spent on a stray tap.
+    }
+
+    private func resolveChoice(keys: [String]) {
+        guard let choice = engine.pendingChoice else { return }
+        stagedChoiceKeys.removeAll()
+        perform(.resolveChoice(keys: keys), by: choice.player)
+    }
+
+    private func choiceTitle(_ choice: PendingChoice) -> String {
+        choice.prompt
+    }
+
+    /// The card that raised the open prompt, named for the sheet's subtitle.
+    private var choiceCardName: String? {
+        guard let choice = engine.pendingChoice else { return nil }
+        return engine.card(for: choice.data.sourceCardID)?.name
+    }
+
+    // MARK: Offers
+
+    /// Whose offers the sheet is showing.
+    private enum OfferSource: Identifiable {
+        case leader
+        case character(UUID)
+
+        /// Everything the acting side controls, opened from the reader.
+        case everything
+
+        var id: String {
+            switch self {
+            case .leader:            return "leader"
+            case .character(let id): return "character-\(id.uuidString)"
+            case .everything:        return "everything"
+            }
+        }
+    }
+
+    private func offerTitle(_ source: OfferSource) -> String {
+        guard let acting = actingSlot else { return "Abilities" }
+        switch source {
+        case .leader:
+            return engine.leaderCard(for: acting)?.name ?? "Leader"
+        case .character(let id):
+            return engine.locateCharacter(id: id)
+                .flatMap { engine.card(for: $0.character)?.name } ?? "Character"
+        case .everything:
+            return "Abilities"
+        }
+    }
+
+    /// Everything the chosen card — or the whole side — can do right now, with
+    /// the engine's own refusal under anything it will not accept.
+    private func offers(for source: OfferSource) -> [BoardOffer] {
+        guard let acting = actingSlot else { return [] }
+        switch source {
+        case .leader:
+            return leaderOffers(for: acting)
+        case .character(let id):
+            return characterOffers(id, for: acting)
+        case .everything:
+            return leaderOffers(for: acting)
+                + engine.side(acting).characters.flatMap { characterOffers($0.id, for: acting) }
+        }
+    }
+
+    /// The Leader's three: its attack, its printed Activate: Main, and Recovery.
+    private func leaderOffers(for slot: PlayerSlot) -> [BoardOffer] {
+        guard let leader = engine.leaderCard(for: slot) else { return [] }
+        var offers: [BoardOffer] = [
+            BoardOffer(
+                id: "leader-attack",
+                headline: "Attack — rests the Leader",
+                text: "Declare an attack on the enemy Leader or a rested enemy character. "
+                    + "Once per turn.",
+                refusal: engine.attackBlock(attacker: .leader, by: slot)?.message,
+                perform: { armAttacker(.leader) }
+            )
+        ]
+
+        for ability in leader.abilities where ability.trigger == .activateMain {
+            offers.append(
+                BoardOffer(
+                    id: "leader-activate",
+                    headline: ability.activationHeadline,
+                    text: ability.text,
+                    refusal: engine.leaderEffectBlock(for: slot)?.message,
+                    perform: { perform(.leaderEffect, by: slot) }
+                )
+            )
+        }
+
+        for ability in leader.abilities where ability.trigger == .recovery {
+            offers.append(
+                BoardOffer(
+                    id: "leader-recovery",
+                    headline: "Recovery — rests the Leader",
+                    text: ability.text,
+                    refusal: engine.recoveryBlock(for: slot)?.message,
+                    perform: { perform(.recovery, by: slot) }
+                )
+            )
+        }
+        return offers
+    }
+
+    /// A body's: its attack, and any printed Activate: Main.
+    private func characterOffers(_ characterID: UUID, for slot: PlayerSlot) -> [BoardOffer] {
+        guard let character = engine.side(slot).character(id: characterID),
+              let card = engine.card(for: character) else { return [] }
+
+        var offers: [BoardOffer] = [
+            BoardOffer(
+                id: "attack-\(characterID.uuidString)",
+                headline: "Attack — rests \(card.name)",
+                text: "Declare an attack on the enemy Leader or a rested enemy character.",
+                refusal: engine.attackBlock(attacker: .character(characterID), by: slot)?.message,
+                perform: { armAttacker(.character(characterID)) }
+            )
+        ]
+
+        for ability in card.abilities where ability.trigger == .activateMain {
+            offers.append(
+                BoardOffer(
+                    id: "activate-\(characterID.uuidString)",
+                    headline: ability.activationHeadline,
+                    text: ability.text,
+                    refusal: engine.characterAbilityBlock(characterID, by: slot)?.message,
+                    perform: { perform(.activateCharacter(characterID), by: slot) }
+                )
+            )
+        }
+        return offers
+    }
+
+    private func armAttacker(_ attacker: AttackerReference) {
+        withAnimation(.easeOut(duration: 0.15)) { armedAttacker = attacker }
+    }
+
+    private func attackerName(_ attacker: AttackerReference) -> String {
+        name(of: attacker, on: actingSlot ?? engine.currentPlayer)
+    }
+
+    private func name(of attacker: AttackerReference, on slot: PlayerSlot) -> String {
+        switch attacker {
+        case .leader:
+            return engine.leaderCard(for: slot)?.name ?? "The Leader"
+        case .character(let id):
+            return engine.locateCharacter(id: id)
+                .flatMap { engine.card(for: $0.character)?.name } ?? "A character"
+        }
     }
 
     // MARK: Contextual actions
@@ -769,293 +1223,81 @@ private struct BoardStage: View {
             return [BoardAction(id: "again", title: "Play again", style: .primary, perform: onPlayAgain)]
         }
 
-        if engine.isAwaitingMulligan {
-            guard isHumanControlled(nearSlot) else { return [] }
+        if let awaiting = engine.state.awaitingMulligan {
+            guard isHumanControlled(awaiting) else { return [] }
             return [
                 BoardAction(id: "keep", title: "Keep this hand", style: .primary) {
-                    perform(.mulligan(false), by: nearSlot)
+                    perform(.mulligan(keep: true), by: awaiting)
                 },
                 BoardAction(id: "mulligan", title: "Mulligan") {
-                    perform(.mulligan(true), by: nearSlot)
+                    perform(.mulligan(keep: false), by: awaiting)
                 }
             ]
         }
 
-        if let blocking = engine.blockingPlayer {
-            guard isHumanControlled(blocking) else { return [] }
-            var answers: [BoardAction] = [
-                BoardAction(id: "take", title: "Take it on the Leader", style: .primary) {
-                    perform(.declareBlock(blockerID: nil), by: blocking)
+        if let choice = boardChoice {
+            var actions = [
+                BoardAction(
+                    id: "confirm",
+                    title: confirmChoiceTitle(choice),
+                    shortTitle: "Confirm",
+                    style: .primary,
+                    isEnabled: !stagedChoiceKeys.isEmpty
+                ) {
+                    resolveChoice(keys: stagedChoiceKeys)
                 }
             ]
-            // A declared attack is the window "During Your Opponent's Attack"
-            // boxes open in, and a tap on a body already means "block with it",
-            // so this is the only way those boxes are reachable.
-            if let ability = abilitiesAction(for: blocking) { answers.append(ability) }
-            return answers
+            if choice.cancellable {
+                actions.append(
+                    BoardAction(id: "decline", title: "Decline", shortTitle: "Decline") {
+                        resolveChoice(keys: [])
+                    }
+                )
+            }
+            return actions
+        }
+
+        // A window has a panel of its own over the mat, and the prompt sheet
+        // answers itself, so the reader keeps out of both.
+        if engine.pendingChoice != nil || engine.responseWindow != nil { return [] }
+
+        if armedAttacker != nil {
+            return [
+                BoardAction(id: "cancel", title: "Cancel the attack", shortTitle: "Cancel", style: .primary) {
+                    cancelTargeting()
+                }
+            ]
         }
 
         guard let acting = actingSlot else { return [] }
 
-        var actions: [BoardAction] = []
-        let canEndPhase = engine.phase == .main || engine.phase == .attack
-        actions.append(
-            BoardAction(id: "phase", title: "End phase", style: .primary, isEnabled: canEndPhase) {
-                perform(.endPhase, by: acting)
-            }
-        )
-
-        // Abilities are easy to forget and now belong to every card in play, so
-        // the way to all of them sits between the two phase controls.
-        if let ability = abilitiesAction(for: acting) { actions.append(ability) }
-
-        actions.append(BoardAction(id: "turn", title: "End turn") { requestEndTurn() })
+        // The turn is undivided, so END TURN is the only turn control there is.
+        var actions: [BoardAction] = [
+            BoardAction(id: "turn", title: "End turn", style: .primary) { requestEndTurn() }
+        ]
+        if let abilities = abilitiesAction(for: acting) { actions.append(abilities) }
         return actions
     }
 
-    /// The one control that reaches every printed ability on the cards a player
-    /// controls.
-    ///
-    /// It exists as well as the card taps because a tap already means something
-    /// else in two places — choosing an attacker, and answering a declared
-    /// attack — and a response window is exactly where an "During Your
-    /// Opponent's Attack" box has to be reachable.
+    private func confirmChoiceTitle(_ choice: PendingChoice) -> String {
+        guard choice.maxSelections > 1 else { return "Confirm the target" }
+        let count = stagedChoiceKeys.count
+        return count == 1 ? "Confirm 1 target" : "Confirm \(count) targets"
+    }
+
+    /// The one control that reaches every printed box on the cards a player
+    /// controls, plus the Leader's attack. It exists as well as the card taps
+    /// because a tap on a body that can swing already means "attack with it".
     private func abilitiesAction(for slot: PlayerSlot) -> BoardAction? {
-        if armedAbility != nil {
-            return BoardAction(id: "ability", title: "Cancel the ability", shortTitle: "Cancel") {
-                cancelAbility()
-            }
-        }
-
-        // Counted per box rather than per action: the engine emits one action
-        // for every legal target, and three ways to point one ability is still
-        // one ability.
-        let boxes = Set(engine.legalAbilities(for: slot).compactMap { action -> String? in
-            guard case .useAbility(let source, let index, _) = action else { return nil }
-            return "\(source.key)-\(index)"
-        })
-        guard !boxes.isEmpty else { return nil }
-
+        let offers = offers(for: .everything)
+        let live = offers.filter(\.isEnabled).count
+        guard !offers.isEmpty else { return nil }
         return BoardAction(
-            id: "ability",
-            title: boxes.count == 1 ? "Use an ability" : "Use one of \(boxes.count) abilities",
-            shortTitle: "Abilities"
+            id: "abilities",
+            title: live == 0 ? "Card actions" : "Card actions (\(live))",
+            shortTitle: "Actions"
         ) {
-            abilityMenu = .everything
-        }
-    }
-
-    // MARK: Abilities
-
-    /// What a side's cards are showing on the mat: which can activate a box
-    /// now, which have already spent one this turn, and which print a box the
-    /// app displays without resolving every step of.
-    private struct AbilityMarks {
-        /// Box positions each card may activate right now, in printed order.
-        var ready: [AbilitySource: [Int]] = [:]
-        var spent: Set<AbilitySource> = []
-        var partial: Set<AbilitySource> = []
-    }
-
-    /// Reads the marks straight off the engine, so a lit card is one the engine
-    /// will accept and a spent one is one it has already recorded.
-    private func abilityMarks(for slot: PlayerSlot) -> AbilityMarks {
-        var marks = AbilityMarks()
-
-        var offered: [AbilitySource: Set<Int>] = [:]
-        for action in engine.legalAbilities(for: slot) {
-            guard case .useAbility(let source, let index, _) = action else { continue }
-            offered[source, default: []].insert(index)
-        }
-        for (source, indices) in offered {
-            marks.ready[source] = indices.sorted()
-        }
-
-        for source in abilitySources(for: slot) {
-            guard let card = engine.abilityCard(for: source, by: slot) else { continue }
-            for index in card.abilities.indices where card.abilities[index].isActivated {
-                if !card.abilities[index].isFullyImplemented { marks.partial.insert(source) }
-                if engine.hasUsedAbility(source, abilityIndex: index, by: slot) {
-                    marks.spent.insert(source)
-                }
-            }
-        }
-        return marks
-    }
-
-    /// Every card on a side that could print an ability: the Leader, then the
-    /// bodies in the order they were summoned.
-    private func abilitySources(for slot: PlayerSlot) -> [AbilitySource] {
-        [.leader] + engine.side(slot).characters.map { AbilitySource.character($0.id) }
-    }
-
-    /// The short line drawn under the Leader.
-    ///
-    /// It names the price of the next activation rather than the ability's
-    /// text: the price is the part a player has to know before pressing
-    /// anything, and the text is one tap away in the picker.
-    private func leaderAbilityNote(_ marks: AbilityMarks, for slot: PlayerSlot) -> String? {
-        guard let card = engine.abilityCard(for: .leader, by: slot) else { return nil }
-
-        let ready = marks.ready[.leader] ?? []
-        if ready.count == 1, card.abilities.indices.contains(ready[0]) {
-            return card.abilities[ready[0]].activationHeadline
-        }
-        if ready.count > 1 { return "\(ready.count) abilities ready" }
-        return marks.spent.contains(.leader) ? "Used this turn" : nil
-    }
-
-    /// Opens the picker for one card, unless it prints nothing to show — in
-    /// which case the tap has already put the card in the reader, which is all
-    /// an ordinary body has to offer.
-    private func openAbilities(for source: AbilitySource, on slot: PlayerSlot) {
-        guard let card = engine.abilityCard(for: source, by: slot) else { return }
-        guard !card.activatedAbilities.isEmpty
-                || !engine.standingRules(for: source, by: slot).isEmpty
-        else { return }
-        abilityMenu = .card(source)
-    }
-
-    private func abilityMenuTitle(_ menu: AbilityMenu) -> String {
-        switch menu {
-        case .card(let source):
-            guard let acting = actingSlot,
-                  let card = engine.abilityCard(for: source, by: acting) else { return "Abilities" }
-            return card.name
-        case .everything:
-            return "Abilities"
-        }
-    }
-
-    /// Builds the offer list the picker draws, from the engine's own answers.
-    ///
-    /// One legal-action walk covers the whole sheet: the engine considers every
-    /// source and every target each time it is asked, and nothing can change
-    /// the answer while the sheet is up.
-    private func abilityGroups(_ menu: AbilityMenu) -> [AbilityGroup] {
-        guard let acting = actingSlot else { return [] }
-
-        let sources: [AbilitySource]
-        switch menu {
-        case .card(let source): sources = [source]
-        case .everything:       sources = abilitySources(for: acting)
-        }
-
-        var legalTargets: [String: Set<UUID>] = [:]
-        for action in engine.legalAbilities(for: acting) {
-            guard case .useAbility(let source, let index, let targetID) = action,
-                  let targetID else { continue }
-            legalTargets["\(source.key)-\(index)", default: []].insert(targetID)
-        }
-
-        return sources.compactMap { source -> AbilityGroup? in
-            guard let card = engine.abilityCard(for: source, by: acting) else { return nil }
-
-            let offers = card.abilities.indices
-                .filter { card.abilities[$0].isActivated }
-                .map { index -> AbilityOffer in
-                    let targets = legalTargets["\(source.key)-\(index)"] ?? []
-                    return AbilityOffer(
-                        source: source,
-                        index: index,
-                        ability: card.abilities[index],
-                        targets: targets,
-                        refusal: refusal(source: source, index: index,
-                                         targets: targets, by: acting)
-                    )
-                }
-
-            let standing = engine.standingRules(for: source, by: acting)
-            guard !offers.isEmpty || !standing.isEmpty else { return nil }
-            return AbilityGroup(source: source, card: card,
-                                offers: offers, standingRules: standing)
-        }
-    }
-
-    /// Why a box cannot be pressed, in the engine's own words.
-    ///
-    /// The engine checks the moment, then the once-per-turn tag, then the cost,
-    /// and only then the target — so asking it with no target names whichever
-    /// of those actually fails. A refusal of `abilityNeedsTarget` means every
-    /// other check passed, which is only a refusal when the board is holding
-    /// nothing legal to point at.
-    private func refusal(
-        source: AbilitySource,
-        index: Int,
-        targets: Set<UUID>,
-        by slot: PlayerSlot
-    ) -> String? {
-        switch engine.planAbility(source: source, abilityIndex: index, targetID: nil, by: slot) {
-        case .success:
-            return nil
-        case .failure(.abilityNeedsTarget):
-            return targets.isEmpty ? "There is no legal target on the board." : nil
-        case .failure(let error):
-            return error.message
-        }
-    }
-
-    /// A box the player pressed in the picker.
-    ///
-    /// An untargeted box resolves at once — its price was printed on the button
-    /// it was pressed from — and a targeted one arms the mat so the next tap
-    /// picks what it acts on.
-    private func choose(_ offer: AbilityOffer) {
-        abilityMenu = nil
-
-        guard let acting = actingSlot,
-              let card = engine.abilityCard(for: offer.source, by: acting) else { return }
-
-        guard offer.ability.target.needsPlayerChoice else {
-            useAbility(source: offer.source, index: offer.index, targetID: nil, by: acting)
-            return
-        }
-
-        withAnimation(.easeOut(duration: 0.15)) {
-            armedAbility = ArmedAbility(
-                source: offer.source,
-                index: offer.index,
-                card: card,
-                ability: offer.ability,
-                targets: offer.targets
-            )
-        }
-    }
-
-    private func cancelAbility() {
-        withAnimation(.easeOut(duration: 0.15)) { armedAbility = nil }
-    }
-
-    /// Picking a target resolves at once or asks first, exactly as picking an
-    /// attack target does — it is the same preference either way.
-    private func requestAbility(_ armed: ArmedAbility, targetID: UUID, targetName: String) {
-        guard let acting = actingSlot else { return }
-        guard settings.targetConfirm == .askMe else {
-            useAbility(source: armed.source, index: armed.index, targetID: targetID, by: acting)
-            return
-        }
-        confirmation = .ability(armed, targetID: targetID, targetName: targetName)
-    }
-
-    /// The one place an activation reaches the engine.
-    ///
-    /// Placing cards back on the deck is the only printed step that asks the
-    /// player for a card from hand, and `GameAction` has no room to carry one —
-    /// so the card lifted out of the hand strip is nominated immediately before
-    /// the action, which is exactly where the engine expects it. With nothing
-    /// lifted the engine falls back to the cards the ability just drew. A
-    /// refused action clears the nomination, so a stale pick can never leak
-    /// into the next activation.
-    private func useAbility(
-        source: AbilitySource,
-        index: Int,
-        targetID: UUID?,
-        by slot: PlayerSlot
-    ) {
-        engine.nominateFromHand(selectedHandIndex.map { [$0] } ?? [])
-        let action = GameAction.useAbility(source: source, abilityIndex: index, targetID: targetID)
-        if !perform(action, by: slot) {
-            engine.nominateFromHand([])
+            offerSheet = .everything
         }
     }
 
@@ -1086,10 +1328,15 @@ private struct BoardStage: View {
     ) -> Bool {
         switch engine.apply(action, by: slot) {
         case .success:
+            // The panels hold a snapshot of a board that has just moved, so
+            // they close with everything else rather than offering plays that
+            // may no longer be legal.
+            handPanel = nil
+            offerSheet = nil
             withAnimation(.easeOut(duration: 0.22)) {
-                selectedAttacker = nil
+                armedAttacker = nil
                 selectedHandIndex = nil
-                armedAbility = nil
+                stagedChoiceKeys.removeAll()
                 banner = nil
             }
             revision += 1
@@ -1103,63 +1350,37 @@ private struct BoardStage: View {
 
     // MARK: Automation
 
-    /// Runs after every accepted action. It either passes the end step for a
-    /// player who asked not to be stopped there, or takes one AI move — and
-    /// then lets the next revision restart it, which is the loop.
+    /// Runs after every accepted action: takes one AI move and lets the next
+    /// revision restart it, which is the loop. Auto-pass is the engine's own —
+    /// it closes a window nobody can answer before the board ever sees it.
     private func advanceAutomation() async {
-        guard !engine.isFinished else { return }
-
-        if shouldAutoPass {
-            try? await Task.sleep(for: Self.autoPassDelay)
-            guard !Task.isCancelled, shouldAutoPass else { return }
-            perform(.endTurn, by: engine.currentPlayer, announcesErrors: false)
-            return
-        }
-
         guard aiOwesAMove else { return }
         try? await Task.sleep(for: Self.aiDelay)
         guard !Task.isCancelled, aiOwesAMove else { return }
         takeAIMove()
     }
 
-    /// The end step is the only place a turn waits with nothing to decide, so it
-    /// is the only place `SettingsStore.autoPass` applies.
-    private var shouldAutoPass: Bool {
-        settings.autoPass == .passForMe
-            && !engine.isFinished
-            && !engine.isAwaitingMulligan
-            && engine.blockingPlayer == nil
-            && engine.phase == .end
-            && isHumanControlled(engine.currentPlayer)
-    }
-
     private var aiOwesAMove: Bool {
-        guard configuration.mode == .versusAI, !engine.isFinished else { return false }
-        if let blocking = engine.blockingPlayer { return blocking == .opponent }
-        if engine.isAwaitingMulligan { return engine.state.needsMulligan(.opponent) }
-        return engine.currentPlayer == .opponent
+        configuration.mode == .versusAI && !engine.isFinished && engine.decider == .opponent
     }
 
     /// Asks the AI for one move. A refusal is never fatal: the board falls back
-    /// to the safe answer for whatever the game is waiting on, so a mistaken AI
-    /// slows the game down rather than freezing it.
+    /// to the first legal action, so a mistaken AI slows the game down rather
+    /// than freezing it.
     private func takeAIMove() {
         let ai = SimpleAI()
         if let action = ai.chooseAction(engine: engine, slot: .opponent),
            perform(action, by: .opponent, announcesErrors: false) {
             return
         }
-        passForAI()
+        for action in engine.legalActions(for: .opponent) where !isConcede(action) {
+            if perform(action, by: .opponent, announcesErrors: false) { return }
+        }
     }
 
-    private func passForAI() {
-        if let blocking = engine.blockingPlayer, blocking == .opponent {
-            perform(.declareBlock(blockerID: nil), by: .opponent, announcesErrors: false)
-        } else if engine.state.needsMulligan(.opponent) {
-            perform(.mulligan(false), by: .opponent, announcesErrors: false)
-        } else if engine.currentPlayer == .opponent {
-            perform(.endTurn, by: .opponent, announcesErrors: false)
-        }
+    private func isConcede(_ action: GameAction) -> Bool {
+        if case .concede = action { return true }
+        return false
     }
 
     // MARK: Banner
@@ -1251,58 +1472,28 @@ private struct BoardStage: View {
         return "\(reason.title) — \(reason.detail)."
     }
 
-    // MARK: Ability state
-
-    /// A printed ability box the player has chosen, waiting for its target.
-    private struct ArmedAbility: Equatable {
-
-        let source: AbilitySource
-        let index: Int
-
-        /// The card the box is printed on, for the prompt and the log line.
-        let card: Card
-
-        let ability: CardAbility
-
-        /// The board identities the engine will accept, taken from its own
-        /// legal action list rather than worked out a second time here.
-        let targets: Set<UUID>
-    }
-
-    /// What the ability picker is showing.
-    private enum AbilityMenu: Identifiable {
-
-        /// One card the player tapped on the mat.
-        case card(AbilitySource)
-
-        /// Everything the acting side controls, opened from the action stack.
-        case everything
-
-        var id: String {
-            switch self {
-            case .card(let source): return source.key
-            case .everything:       return "everything"
-            }
-        }
-    }
-
     // MARK: Confirmations
 
     /// A decision the board holds until the player says yes.
+    ///
+    /// Playing a card is not one of these: its three modes are offered by
+    /// `HandActionPanel`, which has room to name why each of them is or is not
+    /// available, and which asks its own second question when the player has
+    /// turned `SettingsStore.confirmJutsuSummon` on.
     private enum BoardConfirmation: Identifiable {
-        case jutsu(HandCard)
-        case attack(attackerID: UUID, target: AttackTarget, targetName: String)
-        case ability(ArmedAbility, targetID: UUID, targetName: String)
+
+        case attack(attacker: AttackerReference, target: AttackTarget, targetName: String)
         case endTurn
         case leave
 
         var id: String {
             switch self {
-            case .jutsu(let handCard):   return "jutsu-\(handCard.id)"
-            case .attack(let id, _, _):  return "attack-\(id.uuidString)"
-            case .ability(_, let id, _): return "ability-\(id.uuidString)"
-            case .endTurn:               return "end-turn"
-            case .leave:                 return "leave"
+            case .attack(let attacker, let target, _):
+                let who = attacker.characterID?.uuidString ?? "leader"
+                let what = target.characterID?.uuidString ?? "leader"
+                return "attack-\(who)-\(what)"
+            case .endTurn: return "end-turn"
+            case .leave:   return "leave"
             }
         }
     }
@@ -1317,34 +1508,30 @@ private struct BoardStage: View {
     private var confirmationTitle: String {
         guard let confirmation else { return "" }
         switch confirmation {
-        case .jutsu(let handCard):   return handCard.card.name
-        case .attack:               return "Declare the attack?"
-        case .ability(let armed, _, _): return "Use \(armed.card.name)?"
-        case .endTurn:              return "End your turn?"
-        case .leave:                return "Leave the game?"
+        case .attack:  return "Declare the attack?"
+        case .endTurn: return "End your turn?"
+        case .leave:   return "Leave the game?"
         }
     }
 
     private func message(for pending: BoardConfirmation) -> String {
         switch pending {
-        case .jutsu(let handCard):
-            return """
-            Summoning \(handCard.card.name) as a Character costs no chakra. \
-            Playing the support line instead is a jutsu: it costs \
-            \(chakraPhrase(handCard.card.jutsuCost ?? 0)) and sends the card to the Trash.
-            """
-        case .attack(_, _, let targetName):
-            return "Attack \(targetName)."
-        case .ability(let armed, _, let targetName):
-            // The price, the target and the printed words, before anything is
-            // spent — and the caveat, when the app will not apply all of it.
-            var text = "\(armed.ability.activationHeadline), on \(targetName).\n\n\(armed.ability.text)"
-            if !armed.ability.isFullyImplemented {
-                text += "\n\nThe app will not apply every step of this ability."
+        case .attack(let attacker, _, let targetName):
+            // The Leader rests to attack, which costs it the turn's Recovery —
+            // the one thing worth saying before the tap is spent.
+            let mover = attackerName(attacker)
+            guard case .leader = attacker else {
+                return "\(mover) attacks \(targetName) and rests."
             }
-            return text
+            return "\(mover) attacks \(targetName). Attacking rests your Leader, "
+                + "so it cannot also take Recovery this turn."
+
         case .endTurn:
-            return "Anything left in the attack phase will be given up."
+            // The reference's own wording, and only when it is actually true.
+            return engine.hasActionsRemaining(for: engine.currentPlayer)
+                ? "You still have actions available."
+                : "The turn passes to \(displayName(for: engine.currentPlayer.opposing))."
+
         case .leave:
             return "The game is not saved, so leaving ends it."
         }
@@ -1353,26 +1540,9 @@ private struct BoardStage: View {
     @ViewBuilder
     private func confirmationActions(_ pending: BoardConfirmation) -> some View {
         switch pending {
-        case .jutsu(let handCard):
-            // The two halves of the choice are priced differently now, so the
-            // buttons say so rather than leaving the player to remember.
-            Button("Summon as a Character (free)") { play(handCard, asJutsu: false) }
-            Button("Play as a jutsu (\(chakraPhrase(handCard.card.jutsuCost ?? 0)))") {
-                play(handCard, asJutsu: true)
-            }
-            Button("Cancel", role: .cancel) { confirmation = nil }
-
-        case .attack(let attackerID, let target, _):
+        case .attack(let attacker, let target, _):
             Button("Attack") {
-                perform(.attack(attackerID: attackerID, target: target), by: engine.currentPlayer)
-            }
-            Button("Cancel", role: .cancel) { confirmation = nil }
-
-        case .ability(let armed, let targetID, _):
-            Button("Use the ability") {
-                guard let acting = actingSlot else { return }
-                useAbility(source: armed.source, index: armed.index,
-                           targetID: targetID, by: acting)
+                perform(.declareAttack(attacker: attacker, target: target), by: engine.currentPlayer)
             }
             Button("Cancel", role: .cancel) { confirmation = nil }
 
@@ -1385,10 +1555,404 @@ private struct BoardStage: View {
             Button("Stay", role: .cancel) { confirmation = nil }
         }
     }
+}
 
-    /// "1 chakra" rather than "1 chakras", and "free" rather than "0 chakra".
-    private func chakraPhrase(_ amount: Int) -> String {
-        amount == 0 ? "free" : "\(amount) chakra"
+// MARK: - Response window
+
+/// One card offered as an answer to the open window.
+///
+/// The board fills these in from the engine — `faceDownSupports` and
+/// `handCards` for the cards, `slotActivationBlock` and `handActivationBlock`
+/// for the refusals — so a row the panel offers is one the engine will accept,
+/// and a row it refuses carries the engine's own reason rather than a rewording.
+struct ResponseAnswer: Identifiable {
+
+    /// Where the answer is played from. The non-active player can only ever
+    /// answer from a slot; from hand belongs to the active player alone.
+    enum Origin: Hashable {
+        case slot(Int)
+        case hand(Int)
+    }
+
+    let origin: Origin
+
+    let card: Card
+
+    /// The box inside the card's SUPPORT bar — what activating it resolves.
+    let ability: CardAbility
+
+    /// Chakra printed on the left of that bar: the price of the answer.
+    let chakraCost: Int
+
+    /// Why this card cannot answer, in the engine's own words. `nil` when it can.
+    let refusal: String?
+
+    var id: String {
+        switch origin {
+        case .slot(let index): return "slot-\(index)"
+        case .hand(let index): return "hand-\(index)"
+        }
+    }
+
+    /// The badge drawn at the head of the row: the slot number a player reads
+    /// on the mat, or the hand it is coming out of.
+    var badge: String {
+        switch origin {
+        case .slot(let index): return "\(index + 1)"
+        case .hand:            return "H"
+        }
+    }
+
+    var isAllowed: Bool { refusal == nil }
+}
+
+/// The response window, as the reference presents it.
+///
+/// "You may answer with a face-down card", with PASS. The panel adds the three
+/// things the sentence leaves out: what is being answered, which of the
+/// player's own cards could answer it, and what each of them charges.
+///
+/// The list is the engine's own legality, which is what keeps a "Support
+/// Activated" card — Shisui, Kakashi — greyed out with "Wrong moment" while
+/// only a summon is on the table, and lets it in the moment a chain exists.
+struct ResponseWindowPanel: View {
+
+    let window: ResponseWindow
+
+    /// One sentence naming the attack, summon or chain being held up.
+    let subject: String
+
+    /// Every card this player could answer with, offered or refused.
+    let answers: [ResponseAnswer]
+
+    /// Chakra ready right now, so an unaffordable price and its refusal agree
+    /// with something the player can see.
+    let availableChakra: Int
+
+    /// Compact drops the printed ability text, which a phone has no room for.
+    let isCompact: Bool
+
+    /// A row the player pressed.
+    let onActivate: (ResponseAnswer) -> Void
+
+    /// The reference's PASS button.
+    let onPass: () -> Void
+
+    /// How much of a phone the panel may take before the mat stops being
+    /// readable. The list scrolls inside whatever is left.
+    private var maximumHeight: CGFloat { isCompact ? 260 : 340 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+            header
+
+            if answers.isEmpty {
+                emptyNote
+            } else {
+                ScrollView {
+                    VStack(spacing: Metrics.spacingXS) {
+                        ForEach(answers) { answer in
+                            row(answer)
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+
+            WideButton(title: "Pass", style: .primary, action: onPass)
+        }
+        .padding(Metrics.spacingM)
+        .frame(maxWidth: 520)
+        .frame(maxHeight: maximumHeight)
+        .notchedPanel(fill: Palette.panel.opacity(0.97), stroke: Palette.negative)
+        .frame(maxWidth: .infinity)
+        .accessibilityAddTraits(.isModal)
+    }
+
+    // MARK: Header
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: Metrics.spacingS) {
+                Text(window.kind.title)
+                    .font(Typeface.label(10))
+                    .tracking(1.4)
+                    .textCase(.uppercase)
+                    .foregroundStyle(Palette.negative)
+
+                Spacer(minLength: 0)
+
+                Text(chakraReadout)
+                    .font(Typeface.label(10))
+                    .tracking(1)
+                    .textCase(.uppercase)
+                    .foregroundStyle(Palette.textSecondary)
+            }
+
+            Text(window.prompt)
+                .font(Typeface.display(isCompact ? 14 : 17, weight: .bold))
+                .foregroundStyle(Palette.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(subject)
+                .font(Typeface.body(isCompact ? 11 : 13))
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var chakraReadout: String {
+        availableChakra == 1 ? "1 chakra ready" : "\(availableChakra) chakra ready"
+    }
+
+    /// The honest empty state. Only twelve cards in the pool print a SUPPORT
+    /// bar, so holding nothing is the ordinary case rather than a fault.
+    private var emptyNote: some View {
+        Text("You have nothing that can answer this.")
+            .font(Typeface.body(12))
+            .foregroundStyle(Palette.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, Metrics.spacingXS)
+    }
+
+    // MARK: Rows
+
+    /// One card: where it is played from, its name, the chakra it costs, and
+    /// either what it does or why it cannot be used.
+    private func row(_ answer: ResponseAnswer) -> some View {
+        Button {
+            guard answer.isAllowed else { return }
+            onActivate(answer)
+        } label: {
+            HStack(alignment: .top, spacing: Metrics.spacingS) {
+                originBadge(answer)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(answer.card.name)
+                        .font(Typeface.label(12))
+                        .tracking(0.8)
+                        .foregroundStyle(answer.isAllowed ? Palette.textPrimary : Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(detail(answer))
+                        .font(Typeface.body(11))
+                        .foregroundStyle(answer.isAllowed ? Palette.textSecondary : Palette.negative)
+                        .lineLimit(isCompact ? 2 : 4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+
+                costBadge(answer)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(Metrics.spacingS)
+            .notchedPanel(
+                notch: 8,
+                fill: answer.isAllowed ? Palette.panelActive : Palette.surface.opacity(0.6),
+                stroke: answer.isAllowed ? Palette.positive : Palette.border
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!answer.isAllowed)
+        .opacity(answer.isAllowed ? 1 : 0.7)
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(spoken(answer))
+    }
+
+    private func detail(_ answer: ResponseAnswer) -> String {
+        answer.refusal ?? answer.ability.text
+    }
+
+    private func originBadge(_ answer: ResponseAnswer) -> some View {
+        Text(answer.badge)
+            .font(Typeface.numeric(12, weight: .bold))
+            .foregroundStyle(Palette.textOnAccent)
+            .frame(width: 24, height: 24)
+            .background(
+                answer.isAllowed ? Palette.accentMuted : Palette.textSecondary,
+                in: RoundedRectangle(cornerRadius: 4)
+            )
+            .accessibilityHidden(true)
+    }
+
+    private func costBadge(_ answer: ResponseAnswer) -> some View {
+        HStack(spacing: 2) {
+            Image(systemName: "drop.fill")
+                .font(.system(size: 8, weight: .bold))
+            Text("\(answer.chakraCost)")
+                .font(Typeface.numeric(11, weight: .bold))
+        }
+        .foregroundStyle(Palette.textOnAccent)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(
+            answer.chakraCost <= availableChakra ? Palette.positive : Palette.textSecondary,
+            in: RoundedRectangle(cornerRadius: 4)
+        )
+        .accessibilityHidden(true)
+    }
+
+    private func spoken(_ answer: ResponseAnswer) -> String {
+        let where_: String
+        switch answer.origin {
+        case .slot(let index): where_ = "Support slot \(index + 1)"
+        case .hand:            where_ = "From your hand"
+        }
+        var parts = [
+            where_,
+            answer.card.name,
+            answer.chakraCost == 0 ? "free" : "\(answer.chakraCost) chakra"
+        ]
+        parts.append(answer.refusal ?? answer.ability.text)
+        return parts.joined(separator: ", ")
+    }
+}
+
+// MARK: - Prompt sheet
+
+/// The panel for a prompt the mat cannot show: a card in hand to put back on
+/// the deck, a body in the trash to revive, a search through deck and trash.
+///
+/// Board-picked prompts never reach here — those are answered by tapping the
+/// card itself, which is the whole reason the mat highlights them.
+struct ChoicePanel: View {
+
+    let choice: PendingChoice
+
+    /// The question, as the engine worded it.
+    let title: String
+
+    /// The card that raised the prompt, when the engine named one.
+    let subtitle: String?
+
+    /// The answer: one key, or several for a prompt that takes several.
+    let onResolve: ([String]) -> Void
+
+    /// Present only on a prompt that may be declined.
+    let onCancel: (() -> Void)?
+
+    /// Keys picked so far, in the order tapped.
+    @State private var staged: [String] = []
+
+    private var isMultiple: Bool { choice.maxSelections > 1 }
+
+    var body: some View {
+        ZStack {
+            AmbientBackground()
+
+            VStack(alignment: .leading, spacing: Metrics.spacingM) {
+                header
+
+                ScrollView {
+                    VStack(spacing: Metrics.spacingXS) {
+                        ForEach(choice.options) { option in
+                            row(option)
+                        }
+                    }
+                    .padding(.bottom, Metrics.spacingS)
+                }
+                .scrollIndicators(.hidden)
+
+                if isMultiple {
+                    WideButton(title: confirmTitle, style: .primary, isEnabled: !staged.isEmpty) {
+                        onResolve(staged)
+                    }
+                }
+
+                if let onCancel {
+                    WideButton(title: "Decline", style: .secondary, action: onCancel)
+                }
+            }
+            .padding(Metrics.spacingL)
+        }
+    }
+
+    // MARK: Header
+
+    /// The card's name carries the heading and the printed question sits under
+    /// it. A prompt is a whole sentence — set at title size it would push the
+    /// options themselves off a phone-sized sheet.
+    private var header: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingXS) {
+            Text(subtitle ?? "Choose")
+                .font(Typeface.display(20, weight: .bold))
+                .foregroundStyle(Palette.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(title)
+                .font(Typeface.body(13))
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if isMultiple {
+                Text("Pick up to \(choice.maxSelections).")
+                    .font(Typeface.label(10))
+                    .tracking(1.2)
+                    .textCase(.uppercase)
+                    .foregroundStyle(Palette.accent)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var confirmTitle: String {
+        staged.count == 1 ? "Confirm 1 card" : "Confirm \(staged.count) cards"
+    }
+
+    // MARK: Rows
+
+    private func row(_ option: ChoiceOption) -> some View {
+        let isStaged = staged.contains(option.key)
+
+        return Button {
+            choose(option)
+        } label: {
+            HStack(spacing: Metrics.spacingS) {
+                Text(option.title)
+                    .font(Typeface.label(13))
+                    .tracking(0.8)
+                    .foregroundStyle(Palette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer(minLength: 0)
+
+                if isStaged {
+                    Image(systemName: "checkmark")
+                        .font(Typeface.label(12))
+                        .foregroundStyle(Palette.accent)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(Metrics.spacingM)
+            .notchedPanel(
+                notch: 8,
+                fill: isStaged ? Palette.panelActive : Palette.surface.opacity(0.6),
+                stroke: isStaged ? Palette.accent : Palette.border
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(isStaged ? "\(option.title), chosen" : option.title)
+    }
+
+    /// A single-pick prompt answers on the tap; a multi-pick one stages until
+    /// the player confirms, because the whole answer travels in one action.
+    private func choose(_ option: ChoiceOption) {
+        guard isMultiple else {
+            onResolve([option.key])
+            return
+        }
+        if let index = staged.firstIndex(of: option.key) {
+            staged.remove(at: index)
+        } else if staged.count < choice.maxSelections {
+            staged.append(option.key)
+        }
     }
 }
 
@@ -1396,8 +1960,8 @@ private struct BoardStage: View {
 
 /// Fixtures shared by every board preview.
 ///
-/// Previews cannot run statements beside a view, so the mulligan both sides owe
-/// is answered here rather than inline in each `#Preview`.
+/// Previews cannot run statements beside a view, so the mulligan the second
+/// player owes is answered here rather than inline in each `#Preview`.
 enum BoardPreview {
 
     static let configuration = GameConfiguration(
@@ -1418,7 +1982,9 @@ enum BoardPreview {
         isCompact: false
     )
 
-    /// A game past the opening mulligan, so the board has a turn to show.
+    /// A game past the opening mulligan, so the board has a turn to show. Only
+    /// the player going second is ever asked, so both answers are offered and
+    /// whichever one belongs to this seed is the one that lands.
     static func engine(database: CardDatabase) -> GameEngine {
         let engine = GameEngine(
             configuration: configuration,
@@ -1426,20 +1992,68 @@ enum BoardPreview {
             decks: DeckStore(),
             seed: 42
         )
-        engine.apply(.mulligan(false), by: .player)
-        engine.apply(.mulligan(false), by: .opponent)
+        engine.apply(.mulligan(keep: true), by: .player)
+        engine.apply(.mulligan(keep: true), by: .opponent)
         return engine
     }
 
-    /// A short log with both a system line and a player line in it.
+    /// The three-mode action panel for one card, built by hand.
+    ///
+    /// A preview cannot reach a board where a summon has already been spent or
+    /// a jutsu's moment has passed, so the refusals a hand card wears are handed
+    /// in rather than played for. The words are the engine's own — `GameError`
+    /// quotes the reference verbatim — so a preview never shows copy the game
+    /// would not.
+    static func options(
+        for card: Card,
+        summonRefusal: String? = nil,
+        jutsuRefusal: String? = nil
+    ) -> [PlayOption] {
+        let bar = card.supportBarAbility
+        return [
+            PlayOption(mode: .summon, title: "Summon", cost: 0, refusal: summonRefusal),
+            PlayOption(
+                mode: .setAsSupport,
+                title: "Set as support",
+                cost: 0,
+                refusal: bar == nil ? GameError.conditionUnmet.message : nil
+            ),
+            PlayOption(
+                mode: .jutsu,
+                title: "Activate \(card.jutsuName)",
+                cost: bar?.ability.cost.chakra ?? 0,
+                refusal: bar == nil ? GameError.conditionUnmet.message : jutsuRefusal
+            )
+        ]
+    }
+
+    /// A window opened by a summon, which is the case the reference was
+    /// actually watched producing: an empty chain, so only a Quick card could
+    /// answer it.
+    static let summonWindow = ResponseWindow(
+        kind: .summon,
+        respondingSlot: .opponent,
+        chainLength: 0
+    )
+
+    /// The box inside a card's SUPPORT bar, with the printed line standing in
+    /// where a pool has the bar flagged but no box behind it.
+    static func supportBox(of card: Card) -> CardAbility {
+        card.supportBarAbility?.ability
+            ?? CardAbility(trigger: .support, text: card.supportText ?? card.effect)
+    }
+
+    /// A short log with a system line, a summon and the window it opened.
     static func journal() -> Journal {
         var journal = Journal()
         journal.system("Classic game. You go first.")
         journal.record(actor: PlayerSlot.player.title, message: "Kept the opening hand.")
         journal.system("Turn 1 — You.")
-        journal.record(actor: PlayerSlot.player.title, message: "Summoned Naruto Uzumaki.")
-        journal.record(actor: PlayerSlot.player.title, message: "Played Shadow Clone Jutsu to Support for 2 chakra.")
-        journal.system("Attack phase.")
+        journal.record(actor: PlayerSlot.player.title, message: "Draws 1, hand 6, deck 24.")
+        journal.record(actor: PlayerSlot.player.title, message: "Summons Choji Akimichi.")
+        journal.system("Opponent may answer with a face-down card.")
+        journal.record(actor: PlayerSlot.opponent.title, message: "Passes.")
+        journal.record(actor: PlayerSlot.player.title, message: "Sets a card face-down in support slot 1.")
         return journal
     }
 }
@@ -1472,4 +2086,82 @@ enum BoardPreview {
     .environment(CardDatabase())
     .environment(DeckStore())
     .environment(SettingsStore())
+}
+
+/// A summon window with the pair worth looking at: a Quick card that can answer
+/// it, and a "Support Activated" card that cannot, because the chain is empty.
+#Preview("Answering a summon") {
+    let database = CardDatabase()
+    let quick = database.cards.first { $0.supportBarAbility?.ability.trigger == .quick }
+    let response = database.cards.first { $0.supportBarAbility?.ability.trigger == .support }
+    let held = [quick, response].compactMap { $0 }
+
+    return ResponseWindowPanel(
+        window: BoardPreview.summonWindow,
+        subject: "P1 summoned Choji Akimichi.",
+        answers: held.enumerated().map { entry in
+            ResponseAnswer(
+                origin: .slot(entry.offset),
+                card: entry.element,
+                ability: BoardPreview.supportBox(of: entry.element),
+                chakraCost: entry.element.supportBarAbility?.ability.cost.chakra ?? 0,
+                refusal: entry.offset == 1 ? GameError.wrongMoment.message : nil
+            )
+        },
+        availableChakra: 2,
+        isCompact: true,
+        onActivate: { _ in },
+        onPass: {}
+    )
+    .frame(width: 393 - Metrics.spacingS * 2)
+    .padding()
+    .background(Palette.backdrop)
+    .environment(database)
+}
+
+/// Nothing to answer with — the ordinary case. With `autoPass` set to pass for
+/// you the engine closes this window itself and the panel is never drawn.
+#Preview("Nothing to answer with") {
+    let database = CardDatabase()
+
+    return ResponseWindowPanel(
+        window: ResponseWindow(kind: .attack, respondingSlot: .player, chainLength: 0),
+        subject: "Kakashi Hatake is attacking your Leader.",
+        answers: [],
+        availableChakra: 3,
+        isCompact: false,
+        onActivate: { _ in },
+        onPass: {}
+    )
+    .padding()
+    .background(Palette.backdrop)
+    .environment(database)
+}
+
+/// A prompt over a hidden zone: the Leader's dig, which puts a card from hand
+/// back on top of the deck.
+#Preview("Choosing from hand") {
+    let database = CardDatabase()
+    let hand = Array(database.cards.filter { $0.type == .character }.prefix(4))
+
+    return ChoicePanel(
+        choice: PendingChoice(
+            id: UUID(),
+            kind: .leaderPutBack,
+            player: .player,
+            prompt: "Place 1 card from your hand on top of your deck.",
+            options: hand.enumerated().map { entry in
+                ChoiceOption(
+                    key: "hand-\(entry.offset)",
+                    target: .handCard(index: entry.offset),
+                    title: entry.element.name
+                )
+            }
+        ),
+        title: "Place 1 card from your hand on top of your deck.",
+        subtitle: "Sasuke Uchiha",
+        onResolve: { _ in },
+        onCancel: nil
+    )
+    .environment(database)
 }

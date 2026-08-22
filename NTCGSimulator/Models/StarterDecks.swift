@@ -2,49 +2,50 @@
 //  StarterDecks.swift
 //  NTCGSimulator
 //
-//  Ready-made decks, derived from whatever card pool is loaded.
+//  The four ready-made decks, transcribed from the reference simulator's own
+//  prebuilt lists — Team 10, Mount Myoboku, The Taka and Uchiha Illusion —
+//  with the reference's placeholder card numbers mapped onto this pool's ids
+//  by name and stat line.
 //
-//  A new player has nothing to play with until they have hand-built fifty
-//  cards, which is a poor first five minutes. Nothing here names a collector
-//  number: each list is built from the pool by trait and by display order, so an
-//  imported set produces its own starters — or none at all, when a colour cannot
-//  fill a legal deck.
+//  Each list is data, not derivation: fifty exact cards per deck, in the
+//  order the reference prints them. The only construction logic left is the
+//  safety net for an imported pool that no longer carries a listed number —
+//  the gap is filled with the nearest same-colour bodies the pool does print,
+//  so the deck stays legal at fifty cards and four copies, or is withheld
+//  entirely when even that cannot be done.
 //
 
 import Foundation
 import SwiftUI
 
-// MARK: - Theme
+// MARK: - List
 
-/// One ready-made list: a name, the colour whose Leader anchors it, and the
-/// traits that decide which cards are reached for first.
-private struct StarterTheme {
+/// One ready-made deck exactly as the reference ships it: a stable key, the
+/// menu name, the Leader that fronts it, and every card number with its copy
+/// count in the reference's printed order.
+private struct StarterList {
+
+    /// The reference's own deck key — `teamTen`, `mountMyoboku`, `theTaka`,
+    /// `uchihaIllusion`. Hashed into the deck's stable identity.
+    let key: String
+
     let name: String
 
-    /// The Leader's colour. The first Leader printed in this colour fronts the
-    /// deck, so an imported set picks its own.
-    let color: CardColor
+    /// Collector number of the Leader that anchors the deck.
+    let leaderID: String
 
-    /// Traits the theme is about. Cards carrying more of them are taken first;
-    /// everything after that comes from the colour in display order.
-    let traits: [String]
+    /// Card numbers with copy counts, in the reference's listed order.
+    let counts: [(cardID: String, copies: Int)]
 }
 
 // MARK: - Provider
 
-/// Builds legal, playable decks out of the active pool.
+/// The reference's four prebuilt decks, resolved against the active pool.
 enum StarterDecks {
 
-    /// Support cards a starter aims to carry.
-    ///
-    /// Summoning a body is free, so a deck holding no Support cards leaves the
-    /// chakra row with nothing to buy and the economy never comes into play.
-    /// Trimmed automatically when a pool cannot print this many.
-    static let preferredSupportCount = 8
-
-    /// Every ready-made deck the current pool can actually fill, in menu order.
+    /// Every ready-made deck the current pool can field, in menu order.
     static func all(using database: CardDatabase) -> [Deck] {
-        themes.compactMap { deck(for: $0, using: database) }
+        lists.compactMap { deck(for: $0, using: database) }
     }
 
     /// A player-owned copy of a ready-made deck: fresh identity and no longer
@@ -58,142 +59,117 @@ enum StarterDecks {
         return copy
     }
 
-    // MARK: Themes
+    // MARK: The reference lists
 
-    /// Two decks per Leader, so a player meets each colour twice over with a
-    /// different plan rather than the same fifty cards renamed.
-    private static let themes: [StarterTheme] = [
-        StarterTheme(
-            name: "Toad Summons",
-            color: .red,
-            traits: ["Toad", "Mount Myoboku", "Jinchuriki", "The Legendary Sannin"]
+    /// The reference's `PREBUILT_DECKS`, verbatim apart from the id mapping:
+    /// `N-choji`→SMP-01, `N-hinata`→SMP-02, `N-naruto-ex`→SMP-03,
+    /// `N-orochimaru`→SMP-04, `N-sakura`→SMP-15, and `N-reveal-01…09` onto
+    /// the SMP vanilla 3/6/6 bodies by name and traits. The reference slips
+    /// its blue Sakura vanilla into the red Team 10 list; this pool prints
+    /// SMP-13 red, so the same fifty cards are legal here.
+    private static let lists: [StarterList] = [
+        StarterList(
+            key: "teamTen",
+            name: "Team 10, Shadow and Expansion",
+            leaderID: "N-001",
+            counts: [
+                ("N-011", 4), ("N-008", 4), ("SMP-01", 4), ("N-004", 4),
+                ("K-039", 4), ("SMP-02", 4), ("N-006", 4), ("N-007", 4),
+                ("N-005", 3), ("SMP-03", 3),
+                ("SMP-13", 4), ("SMP-07", 4), ("SMP-06", 4)
+            ]
         ),
-        StarterTheme(
-            name: "Leaf Village Assault",
-            color: .red,
-            traits: ["Hidden Leaf Village", "Team 7", "Taijutsu", "The Five Kage"]
+        StarterList(
+            key: "mountMyoboku",
+            name: "Mount Myoboku Summons",
+            leaderID: "N-001",
+            counts: [
+                ("N-005", 4), ("SMP-03", 4), ("N-004", 4), ("N-006", 4),
+                ("N-007", 4), ("K-039", 4), ("N-008", 4), ("N-011", 4),
+                ("SMP-01", 3), ("SMP-02", 3),
+                ("SMP-12", 4), ("SMP-09", 4), ("SMP-07", 4)
+            ]
         ),
-        StarterTheme(
+        StarterList(
+            key: "theTaka",
             name: "The Taka",
-            color: .blue,
-            traits: ["The Taka", "Village Hidden in the Sound", "Snake", "Lightning"]
+            leaderID: "N-012",
+            counts: [
+                ("N-010", 4), ("N-019", 4), ("N-021", 4), ("N-014", 4),
+                ("N-015", 4), ("N-013", 4), ("N-016", 4), ("SMP-15", 4),
+                ("SMP-04", 3), ("N-022", 3),
+                ("SMP-11", 4), ("SMP-08", 4), ("SMP-05", 4)
+            ]
         ),
-        StarterTheme(
+        StarterList(
+            key: "uchihaIllusion",
             name: "Uchiha Illusion",
-            color: .blue,
-            traits: ["Uchiha Clan", "Illusion", "Akatsuki", "Special"]
+            leaderID: "N-012",
+            counts: [
+                ("N-013", 4), ("N-016", 4), ("N-015", 4), ("N-014", 4),
+                ("SMP-04", 4), ("SMP-15", 4), ("N-022", 4), ("N-010", 4),
+                ("N-019", 3), ("N-021", 3),
+                ("SMP-10", 4), ("SMP-08", 4), ("SMP-05", 4)
+            ]
         )
     ]
 
     // MARK: Construction
 
-    /// Builds one theme, or returns `nil` when the pool cannot make it legal —
-    /// no Leader in that colour, or too few cards to reach the required size.
-    private static func deck(for theme: StarterTheme, using database: CardDatabase) -> Deck? {
-        guard let leader = database.leaders.first(where: { $0.color == theme.color }) else { return nil }
+    /// Resolves one list against the pool, or returns `nil` when the pool
+    /// cannot field a legal fifty in the Leader's colour at all.
+    private static func deck(for list: StarterList, using database: CardDatabase) -> Deck? {
+        guard let leader = leader(for: list, using: database) else { return nil }
 
-        let pool = database.cardsPlayable(with: leader)
+        // Take every listed card the pool still prints in the Leader's
+        // colour, clamped to the copy limit. An id the pool lacks — or now
+        // prints off-colour — leaves a gap for the substitution pass.
+        var cardIDs: [String] = []
+        var copies: [String: Int] = [:]
+        for entry in list.counts {
+            guard let card = database.card(id: entry.cardID),
+                  card.color == leader.color,
+                  card.type.countsTowardDeckSize else { continue }
+            let taken = min(entry.copies, DeckRules.maxCopies - copies[card.id, default: 0])
+            guard taken > 0 else { continue }
+            cardIDs.append(contentsOf: Array(repeating: card.id, count: taken))
+            copies[card.id, default: 0] += taken
+        }
 
-        // What chakra can actually be spent on: a Support card, or any card
-        // with a Support line that may be played as a jutsu. A set printing no
-        // Support cards at all still gives chakra a use through the latter, so
-        // both count here — a deck holding neither plays with a dead resource.
-        let sinks = pool.filter { $0.isChakraSink }
-        let rest = pool.filter { !$0.isChakraSink }
-
-        guard let sinkTarget = supportTarget(supports: sinks.count, bodies: rest.count) else { return nil }
-
-        var cardIDs = copies(from: sinks, matching: theme, upTo: sinkTarget)
-        cardIDs += copies(from: rest, matching: theme, upTo: DeckRules.requiredSize - cardIDs.count)
-
-        // Top up from the whole pool if either bucket ran dry, so a lopsided
-        // set still yields a legal deck rather than none.
+        // Substitution: fill any shortfall with the nearest same-colour
+        // bodies the pool does print, in display order, up to the copy limit
+        // on each — so an imported pool still yields a legal deck.
         if cardIDs.count < DeckRules.requiredSize {
-            cardIDs += copies(from: pool, matching: theme,
-                              upTo: DeckRules.requiredSize - cardIDs.count,
-                              excluding: cardIDs)
+            for card in database.cardsPlayable(with: leader) where cardIDs.count < DeckRules.requiredSize {
+                let room = min(
+                    DeckRules.maxCopies - copies[card.id, default: 0],
+                    DeckRules.requiredSize - cardIDs.count
+                )
+                guard room > 0 else { continue }
+                cardIDs.append(contentsOf: Array(repeating: card.id, count: room))
+                copies[card.id, default: 0] += room
+            }
         }
         guard cardIDs.count == DeckRules.requiredSize else { return nil }
 
         return Deck(
-            id: identifier(for: theme),
-            name: theme.name,
+            id: identifier(for: list),
+            name: list.name,
             leaderID: leader.id,
             cardIDs: ordered(cardIDs, using: database),
             isPreconstructed: true
         )
     }
 
-    /// How many of the fifty cards are Support.
-    ///
-    /// Aims at `preferredSupportCount`, but takes more when there are too few
-    /// bodies to fill the rest, and fewer when the pool prints too few Support
-    /// cards. `nil` means the colour cannot reach a legal deck at all.
-    private static func supportTarget(supports: Int, bodies: Int) -> Int? {
-        let supportCapacity = supports * DeckRules.maxCopies
-        let bodyCapacity = bodies * DeckRules.maxCopies
-        guard supportCapacity + bodyCapacity >= DeckRules.requiredSize else { return nil }
-
-        let minimum = max(0, DeckRules.requiredSize - bodyCapacity)
-        return min(supportCapacity, max(minimum, preferredSupportCount), DeckRules.requiredSize)
-    }
-
-    /// Takes up to `limit` cards, most on-theme first and up to the copy limit
-    /// of each, so the deck reads as a themed list rather than a singleton pile.
-    /// Tops a deck up from `cards`, respecting copies already taken.
-    ///
-    /// Used when one bucket runs dry: the deck must still reach exactly the
-    /// required size without exceeding the four-copy limit on any card.
-    private static func copies(
-        from cards: [Card],
-        matching theme: StarterTheme,
-        upTo limit: Int,
-        excluding taken: [String]
-    ) -> [String] {
-        guard limit > 0 else { return [] }
-
-        var counts: [String: Int] = [:]
-        for id in taken { counts[id, default: 0] += 1 }
-
-        let preferred = cards.enumerated().sorted { lhs, rhs in
-            let left = score(lhs.element, in: theme)
-            let right = score(rhs.element, in: theme)
-            return left == right ? lhs.offset < rhs.offset : left > right
+    /// The listed Leader, or the pool's first Leader in the same colour when
+    /// an imported pool renamed it. No Leader at all withholds the deck.
+    private static func leader(for list: StarterList, using database: CardDatabase) -> Card? {
+        if let exact = database.card(id: list.leaderID), exact.type == .leader {
+            return exact
         }
-
-        var picked: [String] = []
-        for entry in preferred where picked.count < limit {
-            let already = counts[entry.element.id, default: 0]
-            let room = min(DeckRules.maxCopies - already, limit - picked.count)
-            guard room > 0 else { continue }
-            picked.append(contentsOf: Array(repeating: entry.element.id, count: room))
-            counts[entry.element.id] = already + room
-        }
-        return picked
-    }
-
-    private static func copies(from cards: [Card], matching theme: StarterTheme, upTo limit: Int) -> [String] {
-        guard limit > 0 else { return [] }
-
-        // Enumerate first so ties fall back to the pool's own display order,
-        // which keeps a deck identical between launches.
-        let preferred = cards.enumerated().sorted { lhs, rhs in
-            let left = score(lhs.element, in: theme)
-            let right = score(rhs.element, in: theme)
-            return left == right ? lhs.offset < rhs.offset : left > right
-        }
-
-        var picked: [String] = []
-        for entry in preferred where picked.count < limit {
-            let room = min(DeckRules.maxCopies, limit - picked.count)
-            picked.append(contentsOf: Array(repeating: entry.element.id, count: room))
-        }
-        return picked
-    }
-
-    /// How much of the theme a card carries.
-    private static func score(_ card: Card, in theme: StarterTheme) -> Int {
-        card.traits.reduce(0) { $0 + (theme.traits.contains($1) ? 1 : 0) }
+        let wantedColor = database.card(id: list.leaderID)?.color
+        return database.leaders.first { wantedColor == nil || $0.color == wantedColor }
+            ?? database.leaders.first
     }
 
     /// Sorts the finished list the way the Collection and the editor sort, so
@@ -210,14 +186,15 @@ enum StarterDecks {
 
     // MARK: Identity
 
-    /// A stable id per theme.
+    /// A stable id per list.
     ///
-    /// Starters are rebuilt every time a view asks for them, so a random `UUID`
-    /// would give SwiftUI a brand-new row on every redraw. Hashing the theme
-    /// keeps the identity fixed without persisting anything.
-    private static func identifier(for theme: StarterTheme) -> UUID {
+    /// Starters are rebuilt every time a view asks for them, so a random
+    /// `UUID` would give SwiftUI a brand-new row on every redraw. Hashing the
+    /// reference's own deck key keeps the identity fixed without persisting
+    /// anything.
+    private static func identifier(for list: StarterList) -> UUID {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325          // FNV-1a offset basis
-        for byte in Array("starter:\(theme.color.rawValue):\(theme.name)".utf8) {
+        for byte in Array("starter:\(list.key)".utf8) {
             hash ^= UInt64(byte)
             hash = hash &* 0x100_0000_01b3                // FNV-1a prime
         }
@@ -260,6 +237,7 @@ extension StarterDecks {
         }
     }
 }
+#endif
 
 // MARK: - Preview
 
@@ -283,4 +261,3 @@ extension StarterDecks {
     .background(Palette.backdrop)
     .environment(database)
 }
-#endif
