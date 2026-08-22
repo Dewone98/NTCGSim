@@ -4,6 +4,7 @@ DerivedData/
 *.xcuserstate
 xcuserdata/
 
+# ---------------------------------------------------------------------------
 # Card artwork is deliberately NOT tracked.
 #
 # The app fetches or imports illustrations onto each user's own device at
@@ -11,10 +12,23 @@ xcuserdata/
 # make this project the distributor of someone else's copyrighted work, which
 # is the one thing an open-source fan project cannot afford to do.
 #
-# If you add art locally for testing, it lives in the app's Application Support
-# container, not here — but these rules exist so a stray copy cannot be
-# committed by accident.
+# Photo exports arrive as .AVIF or .HEIC from a modern iPhone, so those are
+# blocked outright — no legitimate repo asset uses them. .png is NOT blanket
+# blocked because the app icons are tracked, so the art folders block it by
+# path instead.
+# ---------------------------------------------------------------------------
+*.avif
+*.AVIF
+*.heic
+*.HEIC
+*.heif
+*.webp
+
+# Art folders: every image type, wherever they appear.
+**/CardArt/
 NTCGSimulator/Resources/CardArt/
 NTCGSimulator/Resources/cards/
-**/CardArt/
-*.webp
+**/CardArt/**
+NTCGSimulator/Resources/**/*.png
+NTCGSimulator/Resources/**/*.jpg
+NTCGSimulator/Resources/**/*.jpeg

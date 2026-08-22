@@ -95,58 +95,6 @@ enum Rarity: String, Codable, CaseIterable, Identifiable, Hashable {
     }
 }
 
-
-// MARK: - Leader ability
-
-/// An effect a Leader can activate, once per turn.
-///
-/// Card effects at large are printed text the engine does not execute, but a
-/// Leader's ability is the one the player reaches for every turn — so these are
-/// modelled concretely and the engine resolves them.
-enum LeaderAbility: Codable, Hashable {
-
-    /// Draw one card.
-    case drawCard
-
-    /// Restore life to your own Leader.
-    case restoreLife(Int)
-
-    /// Give one of your characters extra power until end of turn.
-    case empowerCharacter(power: Int)
-
-    /// Take power off an opposing character until end of turn.
-    case weakenCharacter(power: Int)
-
-    /// Short description shown on the Leader's activation button.
-    var summary: String {
-        switch self {
-        case .drawCard:
-            return "Draw a card"
-        case .restoreLife(let amount):
-            return "Restore \(amount) life"
-        case .empowerCharacter(let power):
-            return "Give a character +\(power) power"
-        case .weakenCharacter(let power):
-            return "An opposing character loses \(power) power"
-        }
-    }
-
-    /// Whether the player must pick one of their own characters.
-    var needsFriendlyTarget: Bool {
-        if case .empowerCharacter = self { return true }
-        return false
-    }
-
-    /// Whether the player must pick one of the opponent's characters.
-    var needsEnemyTarget: Bool {
-        if case .weakenCharacter = self { return true }
-        return false
-    }
-
-    /// Whether the ability needs a target at all.
-    var needsTarget: Bool { needsFriendlyTarget || needsEnemyTarget }
-}
-
 // MARK: - Chakra cost
 
 /// Works out what a play actually costs.
@@ -205,8 +153,12 @@ struct Card: Codable, Identifiable, Hashable {
     /// being summoned as a body.
     var supportText: String?
 
-    /// The effect this Leader can activate once per turn. Leaders only.
-    var leaderAbility: LeaderAbility?
+    /// Every ability box printed on the card, in print order.
+    ///
+    /// Replaces a single invented `LeaderAbility`: real cards print several
+    /// boxes, each with its own trigger and cost, and characters carry them
+    /// just as Leaders do.
+    var abilities: [CardAbility] = []
 
     /// Illustration credit.
     var artist: String?
@@ -215,12 +167,83 @@ struct Card: Codable, Identifiable, Hashable {
     /// When `nil`, the app draws a generated face from the card's own values.
     var artFilename: String?
 
+    // MARK: Decoding
+
+    /// Decoded leniently so a hand-authored `cards.json` may omit anything that
+    /// does not apply. Swift's synthesised decoding does NOT fall back to a
+    /// property's default value when its key is absent, so omitting `traits` or
+    /// `effect` — which the import format documents as optional — would
+    /// otherwise fail the whole file.
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        id      = try box.decode(String.self, forKey: .id)
+        name    = try box.decode(String.self, forKey: .name)
+        type    = try box.decode(CardType.self, forKey: .type)
+        color   = try box.decode(CardColor.self, forKey: .color)
+        rarity  = try box.decode(Rarity.self, forKey: .rarity)
+        setCode = try box.decode(String.self, forKey: .setCode)
+
+        traits      = try box.decodeIfPresent([String].self, forKey: .traits) ?? []
+        cost        = try box.decodeIfPresent(Int.self, forKey: .cost)
+        power       = try box.decodeIfPresent(Int.self, forKey: .power)
+        damage      = try box.decodeIfPresent(Int.self, forKey: .damage)
+        health      = try box.decodeIfPresent(Int.self, forKey: .health)
+        life        = try box.decodeIfPresent(Int.self, forKey: .life)
+        effect      = try box.decodeIfPresent(String.self, forKey: .effect) ?? ""
+        supportText = try box.decodeIfPresent(String.self, forKey: .supportText)
+        artist      = try box.decodeIfPresent(String.self, forKey: .artist)
+        artFilename = try box.decodeIfPresent(String.self, forKey: .artFilename)
+        abilities   = try box.decodeIfPresent([CardAbility].self, forKey: .abilities) ?? []
+    }
+
+    /// Memberwise initialiser, kept because the custom decoder suppresses the
+    /// synthesised one.
+    init(id: String, name: String, type: CardType, color: CardColor,
+         rarity: Rarity, setCode: String, traits: [String] = [],
+         cost: Int? = nil, power: Int? = nil, damage: Int? = nil,
+         health: Int? = nil, life: Int? = nil, effect: String = "",
+         supportText: String? = nil, artist: String? = nil,
+         artFilename: String? = nil, abilities: [CardAbility] = []) {
+        self.id = id; self.name = name; self.type = type; self.color = color
+        self.rarity = rarity; self.setCode = setCode; self.traits = traits
+        self.cost = cost; self.power = power; self.damage = damage
+        self.health = health; self.life = life; self.effect = effect
+        self.supportText = supportText; self.artist = artist
+        self.artFilename = artFilename; self.abilities = abilities
+    }
+
     // MARK: Derived
 
     /// Whether the card offers the choice of summoning as a body or playing as
     /// a jutsu — the case the "confirm before summoning" setting guards.
     var hasSupportLine: Bool {
         supportText?.isEmpty == false
+    }
+
+    /// Abilities the player activates by pressing something.
+    var activatedAbilities: [CardAbility] {
+        abilities.filter(\.isActivated)
+    }
+
+    /// Abilities that fire by themselves when their moment arrives.
+    func abilities(for trigger: AbilityTrigger) -> [CardAbility] {
+        abilities.filter { $0.trigger == trigger }
+    }
+
+    /// True when the card prints rules the engine cannot yet resolve. Surfaced
+    /// in the UI so a player is never misled about what the app will do.
+    var hasUnimplementedRules: Bool {
+        abilities.contains { !$0.isFullyImplemented }
+    }
+
+    /// Whether this card gives chakra something to be spent on: a Support card,
+    /// or any card with a Support line that may be played as a jutsu.
+    ///
+    /// A deck holding none of these plays with a dead resource, so the deck
+    /// builder and the starter decks both reason in terms of this rather than
+    /// the Support type alone — a set may print no Support cards at all.
+    var isChakraSink: Bool {
+        type == .support || hasSupportLine
     }
 
     /// Chakra spent to summon this card as a body. Always zero — summoning is

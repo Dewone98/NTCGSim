@@ -74,18 +74,28 @@ private enum Tuning {
     /// What one chakra is worth when weighing a purchase against a cheaper one.
     static let chakraWeight = 0.4
 
-    // Leader ability ------------------------------------------------------
+    // Abilities -----------------------------------------------------------
 
     /// What an extra card in hand is worth. Comfortably above `playFloor`, so a
-    /// drawing Leader is activated every turn it safely can be.
+    /// drawing ability is activated every turn it safely can be.
     static let drawValue = 2.5
 
-    /// Cards that must be left in the deck before a Leader draw is worth taking.
-    /// Below this the deck-out clock matters more than the card does.
+    /// What a draw that is handed straight back is worth.
+    ///
+    /// The pool's one drawing box prints "draw 1 card and place 1 card from your
+    /// hand on top of your deck", so no card is gained: what it buys is a look
+    /// at the top of the deck and a card swapped for it. Small, but above
+    /// `playFloor`, because the box costs nothing and a free ability left unused
+    /// is a wasted turn.
+    static let filterValue = 0.5
+
+    /// Cards that must be left in the deck before an ability draw is worth
+    /// taking. Below this the deck-out clock matters more than the card does.
     static let deckOutMargin = 5
 
-    /// Credit for pointing a power bonus at a character that is about to attack,
-    /// before any trade it opens up is counted.
+    /// Credit for pointing a power bonus at a character that is about to attack.
+    /// It is only paid when the bonus actually changes a trade — power that
+    /// kills nothing expires with the turn having bought nothing at all.
     static let empowerBase = 0.5
 
     /// Credit for taking power off an opposing body at all.
@@ -152,8 +162,8 @@ private struct Body {
     let character: CharacterInPlay
     let card: Card
 
-    /// A power change the heuristic is weighing but has not made — the Leader
-    /// ability it is about to spend. Zero for a body as it actually stands.
+    /// A power change the heuristic is weighing but has not made — the ability
+    /// it is about to activate. Zero for a body as it actually stands.
     var pendingBonus: Int = 0
 
     /// The character as it would be with the pending change applied, so power is
@@ -210,12 +220,14 @@ private func bodyValue(of card: Card) -> Double {
 /// - **Mulligan** — keep a hand with bodies in it, otherwise take the redraw.
 /// - **Main phase** — develop first, then spend. Repeat calls put every body in
 ///   hand on the board, buy Support cards with the chakra that is left, and fit
-///   the Leader's once-per-turn ability in around them.
+///   the printed ability boxes on the Leader and on its own characters in
+///   around them.
 /// - **Attack phase** — take lethal if the maths is there; otherwise swing with
 ///   whichever character has the best expected outcome, and stop swinging once
 ///   the remaining attacks would only lose bodies.
-/// - **Blocking** — block when the exchange is favourable or the hit is lethal,
-///   otherwise take it on the Leader.
+/// - **Blocking** — answer with a "During Your Opponent's Attack" box where one
+///   is worth using, otherwise block when the exchange is favourable or the hit
+///   is lethal, otherwise take it on the Leader.
 ///
 /// The economy the main phase assumes is the corrected one: summoning a
 /// Character or an EX Character costs nothing, so board presence is almost
@@ -249,7 +261,8 @@ struct SimpleAI {
 
         /// Deliberately weaker: keeps any opening hand, spends as little as it
         /// can and puts its weakest cards down rather than its best, skips
-        /// marginal attacks and only blocks to stop a lethal swing.
+        /// marginal attacks, answers an attack with a body or not at all rather
+        /// than with a response ability, and only blocks to stop a lethal swing.
         case gentle
 
         /// The full heuristic.
@@ -311,6 +324,18 @@ struct SimpleAI {
             // While an attack is pending the attacker may only concede, so the
             // AI simply waits unless the block decision belongs to it.
             guard engine.blockingPlayer == slot else { return nil }
+
+            // A declared attack is the window a "During Your Opponent's Attack"
+            // box opens in, and the engine offers those here alongside the
+            // blocks. Answering with a card beats answering with a body — a
+            // blocker is exerted for the privilege — so an activation worth
+            // making is taken first, and the block decision is still waiting on
+            // the next call. Gentle passes them up, as it passes up all but the
+            // blocks that keep it alive.
+            if difficulty != .gentle,
+               let response = bestActivation(engine: engine, slot: slot, legal: legal) {
+                return response.action
+            }
             return blockAction(engine: engine, slot: slot, legal: legal)
         }
 
@@ -361,16 +386,17 @@ struct SimpleAI {
 
     // MARK: Main phase
 
-    /// Develops the board, spends what chakra is left, and works the Leader in
-    /// at the point in the turn where it does the most good. The board calls
-    /// back after every move, so a turn empties the hand one card at a time.
+    /// Develops the board, spends what chakra is left, and works the printed
+    /// ability boxes in at the point in the turn where they do the most good.
+    /// The board calls back after every move, so a turn empties the hand one
+    /// card at a time.
     ///
     /// The order is deliberate. An untargeted ability — a draw, a heal — goes
     /// first, because a card drawn now can still be summoned this turn. A
     /// targeted one goes last, once every free summon is already on the board,
     /// so it picks from the best set of characters it will have all turn.
     private func mainAction(engine: GameEngine, slot: PlayerSlot, legal: [GameAction]) -> GameAction {
-        let activation = leaderActivation(engine: engine, slot: slot, legal: legal)
+        let activation = bestActivation(engine: engine, slot: slot, legal: legal)
 
         if let activation, !activation.needsTarget { return activation.action }
         if let play = bestPlay(engine: engine, slot: slot, legal: legal) { return play }
@@ -466,127 +492,386 @@ struct SimpleAI {
         return Tuning.jutsuCardLoss - cost * Tuning.chakraWeight
     }
 
-    // MARK: Leader ability
+    // MARK: Abilities
 
-    /// A Leader activation the heuristic has decided is worth making, and
-    /// whether it names a character — which is what decides where in the turn it
-    /// is taken.
+    /// One activation the engine is offering, resolved back to the printed box
+    /// behind it.
+    ///
+    /// `GameAction.useAbility` carries only a source, an index into the card's
+    /// printed boxes and a target, which is all the engine needs to validate it.
+    /// The heuristic needs the box itself before it can have any opinion, so it
+    /// is looked up once here rather than at every scoring step.
+    private struct Offer {
+        let action: GameAction
+        let source: AbilitySource
+        let card: Card
+        let ability: CardAbility
+        let targetID: UUID?
+    }
+
+    /// An activation the heuristic has decided is worth making, and whether it
+    /// names a card — which is what decides where in the turn it is taken.
     private struct Activation {
         let action: GameAction
         let needsTarget: Bool
     }
 
-    /// The best Leader activation on offer, or `nil` when the Leader has nothing
-    /// worth doing this turn. It is free and it does not carry over, so an
-    /// unused Leader is a wasted turn — the only reason to skip one is that the
-    /// ability genuinely buys nothing right now.
+    /// Every activation on the table right now that is worth weighing.
     ///
-    /// The candidates come from `GameEngine.legalLeaderAbilities(for:)` and are
-    /// then intersected with the actions the engine is offering this instant.
-    /// `GameAction.useLeaderAbility` compares by its target, so an activation
-    /// aimed at a character the engine did not list simply drops out of the set
-    /// instead of desyncing the two.
-    private func leaderActivation(engine: GameEngine, slot: PlayerSlot, legal: [GameAction]) -> Activation? {
-        guard let ability = engine.leaderCard(for: slot)?.leaderAbility else { return nil }
+    /// They are read out of the list the engine is already offering — which
+    /// folds in `GameEngine.legalAbilities(for:)` in both the main phase and the
+    /// pending-attack window — so an activation the engine would refuse can
+    /// never reach the scorer, and the AI cannot desync from the rules by
+    /// building its own candidate list.
+    ///
+    /// One class is filtered out here rather than scored: a box that spends
+    /// nothing and is not limited to once a turn. The board asks the AI for one
+    /// move at a time and applies whatever comes back, so an activation the
+    /// heuristic likes and that never runs out would be chosen again on the very
+    /// next call and the turn would never end. Every activated box in the
+    /// shipped pool either costs chakra or prints "Once Per Turn", so nothing
+    /// playable is lost — but a future card that costs nothing at all cannot
+    /// hang the game.
+    private func offers(engine: GameEngine, slot: PlayerSlot, legal: [GameAction]) -> [Offer] {
+        legal.compactMap { action in
+            guard case .useAbility(let source, let index, let targetID) = action,
+                  let card = engine.abilityCard(for: source, by: slot),
+                  card.abilities.indices.contains(index) else { return nil }
 
-        let permitted = Set(legal.filter { action in
-            if case .useLeaderAbility = action { return true }
-            return false
-        })
-        let offered = engine.legalLeaderAbilities(for: slot).filter { permitted.contains($0) }
+            let ability = card.abilities[index]
+            guard !ability.cost.isFree || ability.oncePerTurn else { return nil }
 
-        var best: (action: GameAction, score: Double)?
-        for action in offered {
-            guard case .useLeaderAbility(let targetID) = action else { continue }
+            return Offer(
+                action: action,
+                source: source,
+                card: card,
+                ability: ability,
+                targetID: targetID
+            )
+        }
+    }
 
-            let score = abilityScore(ability, targetID: targetID, engine: engine, slot: slot)
+    /// The best activation on offer, or `nil` when nothing on the board has
+    /// anything worth doing. Chakra does not bank, so an ability left unused is
+    /// usually a wasted turn — the only reasons to skip one are that it buys
+    /// nothing right now, or that its cost is needed elsewhere.
+    private func bestActivation(engine: GameEngine, slot: PlayerSlot, legal: [GameAction]) -> Activation? {
+        let reserved = reservedChakra(engine: engine, slot: slot, legal: legal)
+        let ready = engine.side(slot).readyChakra
+
+        var best: (offer: Offer, score: Double)?
+        for offer in offers(engine: engine, slot: slot, legal: legal) {
+            // Chakra promised to a purchase is not available to an ability. A
+            // Support card stays on the board for the rest of the game and a
+            // jutsu resolves the moment it is played; a power bonus expires with
+            // the turn, so it is the ability that gives way.
+            guard ready - offer.ability.cost.chakra >= reserved else { continue }
+
+            let score = activationScore(offer, engine: engine, slot: slot)
             guard score > Tuning.playFloor else { continue }
 
             guard let current = best else {
-                best = (action, score)
+                best = (offer, score)
                 continue
             }
-            if score > current.score { best = (action, score) }
+            if score > current.score { best = (offer, score) }
         }
 
         guard let best else { return nil }
-        return Activation(action: best.action, needsTarget: ability.needsTarget)
+        return Activation(
+            action: best.offer.action,
+            needsTarget: best.offer.ability.target.needsPlayerChoice
+        )
     }
 
-    /// Rates one Leader activation, in the same units as a play.
+    /// The most chakra the AI still intends to spend on a card this turn.
     ///
-    /// Both power abilities are cleared during end-of-turn cleanup — the cleanup
-    /// of the turn being spent right now — so neither of them survives into the
-    /// opponent's attack. That makes them attack-phase tools only, and they are
-    /// judged entirely on the combat that follows this main phase.
-    private func abilityScore(
-        _ ability: LeaderAbility,
-        targetID: UUID?,
+    /// The main phase empties the hand one card at a time, so the purchase it
+    /// wants may be several calls away. Holding back the largest single price it
+    /// would pay is enough: anything cheaper is still affordable underneath it,
+    /// and nothing more elaborate is worth doing for a five-chakra economy.
+    private func reservedChakra(engine: GameEngine, slot: PlayerSlot, legal: [GameAction]) -> Int {
+        let hand = engine.side(slot).hand
+        var reserved = 0
+
+        for action in legal {
+            guard case .playCard(let handIndex, let asJutsu) = action,
+                  hand.indices.contains(handIndex),
+                  let card = engine.card(for: hand[handIndex]) else { continue }
+
+            let cost = ChakraCost.toPlay(card, asJutsu: asJutsu)
+            guard cost > 0,
+                  playScore(card: card, asJutsu: asJutsu, engine: engine, slot: slot) > Tuning.playFloor
+            else { continue }
+
+            reserved = max(reserved, cost)
+        }
+        return reserved
+    }
+
+    /// Rates one activation, in the same units as a play: what its printed steps
+    /// are worth, less what they cost to set off.
+    private func activationScore(_ offer: Offer, engine: GameEngine, slot: PlayerSlot) -> Double {
+        effectsScore(offer, engine: engine, slot: slot)
+            - Double(offer.ability.cost.chakra) * Tuning.chakraWeight
+            - sacrificeCost(offer, engine: engine, slot: slot)
+    }
+
+    /// What the bodies a cost would trash are worth, valued exactly as losing
+    /// them in a trade is.
+    ///
+    /// The engine picks which of several eligible characters pays, so the same
+    /// static helper it uses is asked here — otherwise the heuristic would price
+    /// a cost the board then charges to a different character.
+    private func sacrificeCost(_ offer: Offer, engine: GameEngine, slot: PlayerSlot) -> Double {
+        guard offer.ability.cost.trashOwnCharacters > 0 else { return 0 }
+
+        return AbilityResolver
+            .sacrifices(
+                for: offer.ability.cost,
+                controller: slot,
+                in: engine.state,
+                database: engine.database
+            )
+            .compactMap { body(engine.side(slot).character(id: $0), engine: engine) }
+            .reduce(0) { $0 + $1.value * Tuning.ownLossWeight }
+    }
+
+    /// What the printed steps of one box are worth.
+    ///
+    /// Which cards a step reaches is asked of `AbilityResolver` rather than
+    /// worked out again here, so the heuristic is always valuing the cards the
+    /// board would actually change — including the scopes that resolve
+    /// themselves, like the "K.O. all Characters" boxes that hit both sides.
+    private func effectsScore(_ offer: Offer, engine: GameEngine, slot: PlayerSlot) -> Double {
+        let resolver = AbilityResolver(database: engine.database)
+        let context = AbilityContext(
+            source: offer.source,
+            controller: slot,
+            card: offer.card,
+            ability: offer.ability,
+            targetID: offer.targetID,
+            // The AI is never shown a hand picker, so it nominates nothing and
+            // the resolver falls back to the cards just drawn.
+            handSelection: []
+        )
+
+        var score = cardFlowScore(offer.ability.effects, engine: engine, slot: slot)
+        for effect in offer.ability.effects {
+            score += value(
+                of: effect,
+                source: offer.source,
+                engine: engine,
+                slot: slot,
+                hits: { resolver.targets(for: $0, context: context, in: engine.state) }
+            )
+        }
+        return score
+    }
+
+    /// Rates one printed step.
+    ///
+    /// A step the engine cannot resolve is worth exactly nothing, which is the
+    /// whole of what `.unimplemented` means: the AI must not pay chakra for text
+    /// the app will only write to the journal.
+    private func value(
+        of effect: AbilityEffect,
+        source: AbilitySource,
         engine: GameEngine,
-        slot: PlayerSlot
+        slot: PlayerSlot,
+        hits: (AbilityTargetScope) -> [BoardTarget]
     ) -> Double {
-        switch ability {
-        case .drawCard:
-            // The engine refuses to draw from an empty deck rather than losing
-            // the game to a Leader activation, so a draw near the bottom of the
-            // deck is either wasted or one card closer to decking out.
-            guard engine.side(slot).deck.count > Tuning.deckOutMargin else { return 0 }
-            return Tuning.drawValue
+        switch effect {
+        case .drawCards, .placeFromHandOnDeck:
+            // Weighed together by `cardFlowScore`: a draw handed straight back
+            // is not a card gained, and neither half means much alone.
+            return 0
 
-        case .restoreLife(let amount):
+        case .gainLife(let amount):
+            return Double(max(0, amount)) * Tuning.lifeWeight * urgency(of: slot, engine: engine)
+
+        case .loseLife(let amount):
             let life = engine.side(slot).life
-            let urgency = life <= Tuning.closingLife ? Tuning.closingMultiplier : 1.0
-            return Double(max(0, amount)) * Tuning.lifeWeight * urgency
+            guard max(0, amount) < life else { return Tuning.lethalPenalty }
+            return -Double(max(0, amount)) * Tuning.lifeWeight * urgency(of: slot, engine: engine)
 
-        case .empowerCharacter(let power):
-            return empowerScore(power: power, targetID: targetID, engine: engine, slot: slot)
+        case .buffPower(let amount, let scope):
+            return hits(scope).reduce(0) {
+                $0 + powerChangeValue(on: $1, amount: amount, engine: engine, slot: slot)
+            }
 
-        case .weakenCharacter(let power):
-            return weakenScore(power: power, targetID: targetID, engine: engine, slot: slot)
+        case .buffDamage(let amount, let scope):
+            return hits(scope).reduce(0) {
+                $0 + damageChangeValue(on: $1, amount: amount, engine: engine, slot: slot)
+            }
+
+        case .grantRush(let scope):
+            return hits(scope).reduce(0) { $0 + rushValue(on: $1, engine: engine, slot: slot) }
+
+        case .knockOut(let scope):
+            return hits(scope).reduce(0) { $0 + knockOutValue(on: $1, engine: engine, slot: slot) }
+
+        case .cannotAttackNextTurn(let scope):
+            return hits(scope).reduce(0) { $0 + attackBanValue(on: $1, engine: engine, slot: slot) }
+
+        case .restSelf:
+            return restValue(source: source, engine: engine, slot: slot)
+
+        case .flipAllChakraFaceUp:
+            return Double(engine.side(slot).restedChakra) * Tuning.chakraWeight
+
+        case .cannotBeSummonedNormally:
+            // A standing rule the board enforces when the card is played, not
+            // something an activation buys.
+            return 0
+
+        case .unimplemented:
+            return 0
         }
     }
 
-    /// Rates handing one of our characters temporary power.
+    /// Rates the cards a box moves between deck and hand.
     ///
-    /// The bonus expires with the turn, so it is only worth anything on a
-    /// character that is about to attack. On top of that flat credit it is
-    /// worth whatever it changes: where the extra power is what takes an enemy
-    /// body off the board, the activation is worth that body.
-    private func empowerScore(power: Int, targetID: UUID?, engine: GameEngine, slot: PlayerSlot) -> Double {
-        guard let targetID,
-              let target = body(engine.side(slot).character(id: targetID), engine: engine),
-              target.character.canAttack
-        else { return 0 }
+    /// The two steps are weighed together because the pool prints them together:
+    /// a draw paired with a card placed back gains nothing, and scoring the
+    /// halves apart would either talk the AI into a free swap it values as a
+    /// card or out of one it should take. An ability draw from an empty deck now
+    /// loses the game — the engine finishes it exactly as the turn draw does —
+    /// so a deck too short to pay for the step is refused outright.
+    private func cardFlowScore(_ effects: [AbilityEffect], engine: GameEngine, slot: PlayerSlot) -> Double {
+        var drawn = 0
+        var returned = 0
+        for effect in effects {
+            switch effect {
+            case .drawCards(let count):           drawn += max(0, count)
+            case .placeFromHandOnDeck(let count):  returned += max(0, count)
+            default:                               break
+            }
+        }
+        guard drawn > 0 || returned > 0 else { return 0 }
 
-        let boosted = target.adjusted(by: power)
-        let swing = engine.side(slot.opposing).characters
-            .compactMap { body($0, engine: engine) }
-            .map { exchange(ours: boosted, theirs: $0) - exchange(ours: target, theirs: $0) }
-            .max() ?? 0
+        let deck = engine.side(slot).deck.count
+        guard deck >= drawn else { return Tuning.lethalPenalty }
 
-        return Tuning.empowerBase + max(0, swing)
+        let net = drawn - returned
+        if net < 0 { return Double(net) * Tuning.drawValue }
+        if net == 0 { return Tuning.filterValue }
+
+        // A card gained is only worth having if the deck can spare it.
+        guard deck > Tuning.deckOutMargin else { return 0 }
+        return Double(net) * Tuning.drawValue
     }
 
-    /// Rates taking power off an opposing character.
+    /// Rates a power change on one body, from the point of view of `slot`.
     ///
-    /// It expires with the turn too, so it cannot blunt the swing back — what it
-    /// does is neuter a blocker. The credit is the best trade it opens up for a
-    /// character that can attack this turn, plus a smaller amount for the raw
-    /// power removed, which is what aims it at the biggest threat when no trade
-    /// swings either way.
-    private func weakenScore(power: Int, targetID: UUID?, engine: GameEngine, slot: PlayerSlot) -> Double {
-        guard let targetID,
-              let target = body(engine.side(slot.opposing).character(id: targetID), engine: engine)
-        else { return 0 }
+    /// Every power change in the pool expires during end-of-turn cleanup — the
+    /// cleanup of the turn being spent right now — so none of them survives into
+    /// the opponent's attack. That makes them attack-phase tools only, judged
+    /// entirely on the combat that follows this main phase.
+    private func powerChangeValue(
+        on hit: BoardTarget,
+        amount: Int,
+        engine: GameEngine,
+        slot: PlayerSlot
+    ) -> Double {
+        guard let target = body(at: hit, engine: engine) else { return 0 }
+        let changed = target.adjusted(by: amount)
 
-        let weakened = target.adjusted(by: -power)
+        if hit.slot == slot {
+            // Ours: worth nothing at all on a body that is not going to attack.
+            guard target.character.canAttack else { return 0 }
+
+            let swing = engine.side(slot.opposing).characters
+                .compactMap { body($0, engine: engine) }
+                .map { exchange(ours: changed, theirs: $0) - exchange(ours: target, theirs: $0) }
+                .max() ?? 0
+
+            // Power that changes no trade bought nothing; power that cost us one
+            // is charged for honestly.
+            guard swing > 0 else { return swing }
+            return Tuning.empowerBase + swing
+        }
+
+        // Theirs: it cannot blunt the swing back, so what it does is neuter a
+        // blocker. The credit is the best trade it opens up for a character that
+        // can attack this turn, plus a smaller amount for the raw power removed,
+        // which is what aims a weaken at the biggest threat when no trade swings
+        // either way — and what makes handing an opposing body power a mistake.
         let swing = engine.side(slot).attackers
             .compactMap { body($0, engine: engine) }
-            .map { exchange(ours: $0, theirs: weakened) - exchange(ours: $0, theirs: target) }
+            .map { exchange(ours: $0, theirs: changed) - exchange(ours: $0, theirs: target) }
             .max() ?? 0
 
-        let removed = Double(max(0, target.power - weakened.power))
-        return Tuning.weakenBase + max(0, swing) + removed * Tuning.weakenThreatWeight
+        let removed = Double(target.power - changed.power)
+        return (amount < 0 ? Tuning.weakenBase : 0) + swing + removed * Tuning.weakenThreatWeight
+    }
+
+    /// Rates a damage change: straight life off the Leader the body attacks,
+    /// worth more once that Leader is inside `closingLife`.
+    private func damageChangeValue(
+        on hit: BoardTarget,
+        amount: Int,
+        engine: GameEngine,
+        slot: PlayerSlot
+    ) -> Double {
+        guard let target = body(at: hit, engine: engine), target.character.canAttack else { return 0 }
+        let worth = Double(amount) * Tuning.lifeWeight * urgency(of: hit.slot.opposing, engine: engine)
+        return hit.slot == slot ? worth : -worth
+    }
+
+    /// Rates granting Rush. It is worth the attack it unlocks and nothing more,
+    /// so it is worth nothing on a body that could already swing.
+    private func rushValue(on hit: BoardTarget, engine: GameEngine, slot: PlayerSlot) -> Double {
+        guard let target = body(at: hit, engine: engine),
+              target.character.summonedThisTurn,
+              !target.character.isRested,
+              !target.character.isBarredFromAttacking
+        else { return 0 }
+
+        let worth = Tuning.initiativeBonus
+            + Double(target.damage) * Tuning.lifeWeight * urgency(of: hit.slot.opposing, engine: engine)
+        return hit.slot == slot ? worth : -worth
+    }
+
+    /// Rates sending a body to the Trash. Ours are valued at the same discount a
+    /// trade values them at, which is what makes a board wipe reaching both
+    /// sides — the two "K.O. all Characters" boxes — a move the AI only makes
+    /// when it is behind on bodies.
+    private func knockOutValue(on hit: BoardTarget, engine: GameEngine, slot: PlayerSlot) -> Double {
+        guard let target = body(at: hit, engine: engine) else { return 0 }
+        return hit.slot == slot ? -target.value * Tuning.ownLossWeight : target.value
+    }
+
+    /// Rates holding a body back from attacking next turn: worth the swing it
+    /// takes away, at the value of the life that swing would have cost.
+    private func attackBanValue(on hit: BoardTarget, engine: GameEngine, slot: PlayerSlot) -> Double {
+        guard let target = body(at: hit, engine: engine) else { return 0 }
+        let worth = Double(target.damage) * Tuning.lifeWeight * urgency(of: hit.slot.opposing, engine: engine)
+        return hit.slot == slot ? -worth : worth
+    }
+
+    /// Rates resting the card the box is printed on.
+    ///
+    /// On a character it costs the swing it was going to make, or — if it was
+    /// never going to attack — the block it can no longer make. On a Leader it
+    /// costs nothing: nothing in the implemented ruleset asks a Leader to attack
+    /// or block, so `PlayerSide.leaderIsRested` is board state and no more.
+    private func restValue(source: AbilitySource, engine: GameEngine, slot: PlayerSlot) -> Double {
+        guard let characterID = source.characterID,
+              let target = body(engine.side(slot).character(id: characterID), engine: engine)
+        else { return 0 }
+
+        guard !target.character.isRested else { return 0 }
+        guard target.character.canAttack else { return -Tuning.blockRestCost }
+
+        return -(Tuning.initiativeBonus
+            + Double(target.damage) * Tuning.lifeWeight * urgency(of: slot.opposing, engine: engine))
+    }
+
+    /// How much a point of a side's life is worth right now: more once that
+    /// Leader is close enough to losing for life to be the scarce resource.
+    private func urgency(of slot: PlayerSlot, engine: GameEngine) -> Double {
+        engine.side(slot).life <= Tuning.closingLife ? Tuning.closingMultiplier : 1.0
     }
 
     // MARK: Attack phase
@@ -786,9 +1071,9 @@ struct SimpleAI {
     /// It mirrors `GameEngine.resolveBattle` exactly — effective power against
     /// *remaining* health, both results simultaneous — so the heuristic never
     /// predicts a trade the rules would resolve differently, including the power
-    /// a Leader ability has already granted or taken away. Damage that falls
-    /// short is ignored on purpose: the engine heals every board during
-    /// end-of-turn cleanup, so only deaths carry across the turn.
+    /// an ability has already granted or taken away. Damage that falls short is
+    /// ignored on purpose: the engine heals every board during end-of-turn
+    /// cleanup, so only deaths carry across the turn.
     private func exchange(ours: Body, theirs: Body) -> Double {
         var score = 0.0
         if ours.power >= theirs.remainingHealth { score += theirs.value }
@@ -802,5 +1087,13 @@ struct SimpleAI {
     private func body(_ character: CharacterInPlay?, engine: GameEngine) -> Body? {
         guard let character, let card = engine.card(for: character) else { return nil }
         return Body(character: character, card: card)
+    }
+
+    /// The body an effect is about to change. `BoardTarget` carries the side it
+    /// belongs to because effects routinely reach across the table — a scope
+    /// like "all Characters" hits both boards — so the owner is read from the
+    /// target rather than assumed to be the activating player.
+    private func body(at target: BoardTarget, engine: GameEngine) -> Body? {
+        body(engine.side(target.slot).character(id: target.id), engine: engine)
     }
 }

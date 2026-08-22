@@ -16,6 +16,11 @@ import SwiftUI
 ///
 /// The board works this out once per side from the engine's own legality checks,
 /// so a highlighted card is always a card the engine will actually accept.
+///
+/// Abilities are addressed by `AbilitySource` rather than by a Leader-only flag,
+/// because every card in play may print one: a side's Leader is `.leader` and
+/// each body is `.character(id)`, and the sets below are always read against the
+/// side they were built for.
 struct BoardEmphasis: Equatable {
 
     /// Ring the characters that may still declare an attack this turn.
@@ -27,25 +32,36 @@ struct BoardEmphasis: Equatable {
     /// Ring the characters that could answer a declared attack.
     var blockers = false
 
-    /// The bodies an armed Leader ability may legally be pointed at, taken from
-    /// `legalLeaderAbilities`. A ringed body is one the engine will accept.
+    /// The bodies an armed ability may legally be pointed at, taken from
+    /// `legalAbilities`. A ringed body is one the engine will accept.
     var abilityTargets: Set<UUID> = []
 
-    /// A Leader ability is waiting for its target, so everything that is not a
-    /// legal target steps back out of the way.
+    /// An ability is waiting for its target, so everything that is not a legal
+    /// target steps back out of the way.
     var isTargeting = false
+
+    /// The card that asked the question, kept lit while it waits for an answer.
+    var armedSource: AbilitySource? = nil
+
+    /// Cards on this side that can activate a printed box right now.
+    var readyAbilities: Set<AbilitySource> = []
+
+    /// Cards on this side that have already spent a box this turn.
+    var spentAbilities: Set<AbilitySource> = []
+
+    /// Cards printing an activated box the app displays without resolving every
+    /// step of. Marked on the mat rather than left to be discovered mid-game.
+    var partialAbilities: Set<AbilitySource> = []
+
+    /// The line drawn under the Leader: what its next activation costs, or that
+    /// it has already gone this turn.
+    var leaderAbilityNote: String? = nil
 
     /// The character the player has already chosen.
     var selected: UUID? = nil
 
     /// The Leader is a legal target for the chosen attacker.
     var leaderIsTarget = false
-
-    /// This Leader still has its once-a-turn ability in hand.
-    var leaderIsReady = false
-
-    /// This Leader has already spent its ability this turn.
-    var leaderIsSpent = false
 }
 
 // MARK: - Side
@@ -79,16 +95,17 @@ struct BoardSideView: View {
     /// A long press anywhere on the side sends the card to the reader.
     let onRead: (Card) -> Void
 
-    /// A tap on a body — attacker choice, target choice or block answer.
+    /// A tap on a body — its ability picker, attacker choice, target choice or
+    /// block answer, depending on what the board is waiting for.
     let onSelectCharacter: (CharacterInPlay) -> Void
 
-    /// A tap on the Leader: its own ability button, or an attack target.
+    /// A tap on the Leader: its own ability picker, or an attack target.
     let onSelectLeader: () -> Void
 
     private var side: PlayerSide { engine.side(slot) }
 
-    /// How far back anything that is not a legal target fades while a Leader
-    /// ability is choosing one. Matches the dim `CardFaceView` applies itself.
+    /// How far back anything that is not a legal target fades while an ability
+    /// is choosing one. Matches the dim `CardFaceView` applies itself.
     private static let pushedBackOpacity: CGFloat = 0.45
 
     var body: some View {
@@ -168,6 +185,7 @@ struct BoardSideView: View {
 
     private func characterSlot(_ character: CharacterInPlay) -> some View {
         let card = engine.card(for: character)
+        let source = AbilitySource.character(character.id)
 
         return ZStack(alignment: .bottomTrailing) {
             Group {
@@ -194,14 +212,18 @@ struct BoardSideView: View {
                 healthBadge(character.remainingHealth(of: card))
             }
 
-            // A modified body has to read as the number combat will use, not
-            // as the number printed on the card.
-            if let card, character.powerBonus != 0 {
-                powerBadge(character.effectivePower(of: card), bonus: character.powerBonus)
+            if let card {
+                modifierStrip(character, card: card)
             }
 
             if character.summonedThisTurn {
                 sicknessMark
+            }
+
+            if emphasis.readyAbilities.contains(source) {
+                abilityMark(isPartial: emphasis.partialAbilities.contains(source))
+                    .padding(2)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
         }
         .frame(width: layout.slotWidth, height: layout.slotHeight)
@@ -298,14 +320,24 @@ struct BoardSideView: View {
         // A pool imported without a Leader leaves the side anchored to nothing,
         // so the card back stands in rather than the board collapsing.
         if let leader = engine.leaderCard(for: slot) {
-            BoardCardFace(
-                card: leader,
-                width: layout.leaderWidth,
-                isDimmed: emphasis.isTargeting && !emphasis.leaderIsReady,
-                highlight: leaderHighlight
-            )
-            .overlay(alignment: .topTrailing) {
-                if emphasis.leaderIsReady { abilityMark }
+            ZStack(alignment: .topTrailing) {
+                BoardCardFace(
+                    card: leader,
+                    width: layout.leaderWidth,
+                    isDimmed: emphasis.isTargeting && !leaderIsArmed,
+                    highlight: leaderHighlight
+                )
+                // Several cards print "rest this card" on a Leader, so a Leader
+                // is turned on its side exactly as a body is — the mat already
+                // has one way of saying rested and does not need a second.
+                .rotationEffect(.degrees(side.leaderIsRested ? 90 : 0))
+                .scaleEffect(side.leaderIsRested ? Metrics.cardAspect : 1)
+                .animation(.easeOut(duration: 0.22), value: side.leaderIsRested)
+
+                if leaderHasReadyAbility {
+                    abilityMark(isPartial: emphasis.partialAbilities.contains(.leader))
+                        .padding(2)
+                }
             }
             .contentShape(Rectangle())
             .onTapGesture { onSelectLeader() }
@@ -320,11 +352,25 @@ struct BoardSideView: View {
         }
     }
 
-    /// The Leader answers a tap as an ability button or as an attack target.
-    /// Once its ability is spent it is inert for the rest of the turn — a tap
-    /// still puts it in the reader, but it is no longer a control.
+    /// This Leader can activate at least one of its printed boxes right now.
+    private var leaderHasReadyAbility: Bool {
+        emphasis.readyAbilities.contains(.leader)
+    }
+
+    /// This Leader has already spent one of its boxes this turn.
+    private var leaderHasSpentAbility: Bool {
+        emphasis.spentAbilities.contains(.leader)
+    }
+
+    /// This Leader is the card currently waiting for a target.
+    private var leaderIsArmed: Bool {
+        emphasis.armedSource == .leader
+    }
+
+    /// The Leader answers a tap as its own ability picker or as an attack
+    /// target. It is otherwise inert — a tap still puts it in the reader.
     private var leaderIsInteractive: Bool {
-        emphasis.leaderIsReady || emphasis.leaderIsTarget
+        leaderHasReadyAbility || leaderIsArmed || emphasis.leaderIsTarget
     }
 
     /// A target ring beats an "ability ready" ring: being attacked is the more
@@ -332,35 +378,45 @@ struct BoardSideView: View {
     /// still reads as the control it was rather than as an ordinary card.
     private var leaderHighlight: Color? {
         if emphasis.leaderIsTarget { return Palette.negative }
-        if emphasis.leaderIsReady { return Palette.accent }
-        if emphasis.leaderIsSpent { return Palette.border }
+        if leaderIsArmed { return Palette.accentMuted }
+        if leaderHasReadyAbility { return Palette.accent }
+        if leaderHasSpentAbility { return Palette.border }
         return nil
     }
 
-    /// Marks a Leader whose once-a-turn ability has not been spent.
-    private var abilityMark: some View {
-        Image(systemName: "sparkles")
-            .font(.system(size: 8, weight: .bold))
-            .foregroundStyle(Palette.textOnAccent)
-            .padding(3)
-            .background(Palette.accent, in: Circle())
-            .padding(2)
-            .accessibilityHidden(true)
+    /// Marks a card in play that can activate a printed box right now.
+    ///
+    /// The warning form says the box is one the app will show and only partly
+    /// resolve. That is the thing a player most needs to know before pressing
+    /// it, and a board slot has no room for a sentence.
+    private func abilityMark(isPartial: Bool) -> some View {
+        HStack(spacing: 1) {
+            Image(systemName: "sparkles")
+            if isPartial {
+                Image(systemName: "exclamationmark.triangle.fill")
+            }
+        }
+        .font(.system(size: 7, weight: .bold))
+        .foregroundStyle(Palette.textOnAccent)
+        .padding(.horizontal, 3)
+        .padding(.vertical, 2)
+        .background(isPartial ? Palette.warning : Palette.accent, in: Capsule())
+        .accessibilityHidden(true)
     }
 
-    /// Says what the Leader does, under the card.
+    /// Says what the Leader's next activation costs, under the card.
     ///
-    /// The ability is the one control on the mat with nothing printed to
-    /// explain it, so it names itself rather than relying on the ring alone —
-    /// and says so plainly once it has been spent.
+    /// The price is the part a player has to know before pressing anything, and
+    /// the printed text is one tap away in the picker — so this carries the
+    /// price rather than an abbreviated rules line that would fit nowhere.
     @ViewBuilder
     private var abilityBadge: some View {
-        if let text = abilityBadgeText {
+        if let text = emphasis.leaderAbilityNote {
             Text(text)
                 .font(Typeface.label(layout.leaderWidth < 64 ? 8 : 10))
                 .tracking(0.6)
                 .textCase(.uppercase)
-                .foregroundStyle(emphasis.leaderIsReady ? Palette.textOnAccent : Palette.textSecondary)
+                .foregroundStyle(leaderHasReadyAbility ? Palette.textOnAccent : Palette.textSecondary)
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
                 .minimumScaleFactor(0.55)
@@ -368,33 +424,25 @@ struct BoardSideView: View {
                 .padding(.vertical, 3)
                 .frame(maxWidth: .infinity)
                 .background(
-                    emphasis.leaderIsReady ? Palette.accent : Palette.surface,
+                    leaderHasReadyAbility ? Palette.accent : Palette.surface,
                     in: NotchedRectangle(notch: 5, corners: .diagonal)
                 )
                 .accessibilityHidden(true)
         }
     }
 
-    private var abilityBadgeText: String? {
-        if emphasis.leaderIsReady {
-            guard let ability = engine.leaderCard(for: slot)?.leaderAbility else { return nil }
-            return emphasis.isTargeting ? "Tap to cancel" : ability.summary
-        }
-        return emphasis.leaderIsSpent ? "Used this turn" : nil
-    }
-
     private func leaderDescription(_ leader: Card) -> String {
         var parts = ["\(title) Leader", leader.name, "\(side.life) life"]
-        if let ability = leader.leaderAbility {
-            if emphasis.leaderIsReady {
-                parts.append(
-                    emphasis.isTargeting
-                        ? "choosing a target for \(ability.summary), double tap to cancel"
-                        : "ability ready, \(ability.summary)"
-                )
-            } else if emphasis.leaderIsSpent {
-                parts.append("ability used this turn")
-            }
+        if side.leaderIsRested { parts.append("rested") }
+
+        if leaderIsArmed {
+            parts.append("choosing a target for its ability")
+        } else if let note = emphasis.leaderAbilityNote {
+            parts.append(leaderHasReadyAbility ? "ability ready, \(note)" : note.lowercased())
+        }
+
+        if leader.hasUnimplementedRules {
+            parts.append("prints rules the app does not fully apply")
         }
         return parts.joined(separator: ", ")
     }
@@ -452,26 +500,95 @@ struct BoardSideView: View {
             .accessibilityHidden(true)
     }
 
-    /// Power after a Leader ability has moved it, drawn over the printed value
-    /// the way the health badge covers printed health. The marker says how far
-    /// it moved, tinted for the direction, and expires with the turn.
-    private func powerBadge(_ power: Int, bonus: Int) -> some View {
+    // MARK: Modifiers
+
+    /// One temporary modifier, drawn as a chip on the body it belongs to.
+    private struct ModifierChip: Identifiable {
+
+        let id: String
+
+        /// A glyph for a keyword. `nil` on a numeric chip.
+        let symbol: String?
+
+        /// The value combat will use and how far an ability moved it. `nil` on
+        /// a keyword chip.
+        let text: String?
+
+        let tint: Color
+    }
+
+    /// Everything an ability did to a body that the printed face cannot show.
+    ///
+    /// Power and damage are drawn as the numbers combat will actually use, not
+    /// as the numbers printed on the card; Rush and an attack ban are keywords
+    /// with nothing printed anywhere. All of it expires with the turn, and a
+    /// player who cannot see it cannot plan around it.
+    @ViewBuilder
+    private func modifierStrip(_ character: CharacterInPlay, card: Card) -> some View {
+        let chips = modifierChips(character, card: card)
+        if !chips.isEmpty {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(chips) { chip in
+                    modifierChip(chip)
+                }
+            }
+            .padding(2)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private func modifierChips(_ character: CharacterInPlay, card: Card) -> [ModifierChip] {
+        var chips: [ModifierChip] = []
+
+        if character.hasRush {
+            chips.append(ModifierChip(id: "rush", symbol: "bolt.fill",
+                                      text: nil, tint: Palette.accent))
+        }
+        if character.isBarredFromAttacking {
+            chips.append(ModifierChip(id: "barred", symbol: "nosign",
+                                      text: nil, tint: Palette.negative))
+        }
+        if character.powerBonus != 0 {
+            chips.append(ModifierChip(
+                id: "power",
+                symbol: nil,
+                text: "P\(character.effectivePower(of: card)) \(signed(character.powerBonus))",
+                tint: character.powerBonus > 0 ? Palette.positive : Palette.negative
+            ))
+        }
+        if character.damageBonus != 0 {
+            chips.append(ModifierChip(
+                id: "damage",
+                symbol: nil,
+                text: "D\(character.effectiveDamage(of: card)) \(signed(character.damageBonus))",
+                tint: character.damageBonus > 0 ? Palette.positive : Palette.negative
+            ))
+        }
+        return chips
+    }
+
+    private func modifierChip(_ chip: ModifierChip) -> some View {
         HStack(spacing: 1.5) {
-            Text("\(power)")
-                .font(Typeface.numeric(9, weight: .bold))
-            Text(bonus > 0 ? "+\(bonus)" : "\(bonus)")
-                .font(Typeface.numeric(7, weight: .bold))
+            if let symbol = chip.symbol {
+                Image(systemName: symbol)
+                    .font(.system(size: 6.5, weight: .black))
+            }
+            if let text = chip.text {
+                Text(text)
+                    .font(Typeface.numeric(8, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+            }
         }
         .foregroundStyle(Palette.textOnAccent)
-        .padding(.horizontal, 3)
-        .padding(.vertical, 1)
-        .background(
-            bonus > 0 ? Palette.positive : Palette.negative,
-            in: RoundedRectangle(cornerRadius: 3)
-        )
-        .padding(2)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-        .accessibilityHidden(true)
+        .padding(.horizontal, 2.5)
+        .padding(.vertical, 0.5)
+        .background(chip.tint, in: RoundedRectangle(cornerRadius: 3))
+    }
+
+    private func signed(_ amount: Int) -> String {
+        amount > 0 ? "+\(amount)" : "\(amount)"
     }
 
     /// Marks a body that arrived this turn and therefore cannot attack yet.
@@ -486,22 +603,31 @@ struct BoardSideView: View {
 
     // MARK: Highlighting
 
-    /// The one place a slot's ring colour is decided, so selection, attack and
-    /// block emphasis can never fight each other.
+    /// The one place a slot's ring colour is decided, so selection, attack,
+    /// block and ability emphasis can never fight each other.
+    ///
+    /// Targeting comes first because it is the question the board is asking;
+    /// an "ability ready" ring comes last because it is the only one that is
+    /// not about a decision already in progress.
     private func highlight(for character: CharacterInPlay) -> Color? {
         if emphasis.selected == character.id { return Palette.accent }
         if emphasis.abilityTargets.contains(character.id) { return Palette.warning }
+        if emphasis.armedSource == .character(character.id) { return Palette.accentMuted }
         if emphasis.isTargeting { return nil }
         if emphasis.blockers, character.isReady { return Palette.positive }
         if emphasis.attackers, character.canAttack { return Palette.accentMuted }
         if emphasis.targets { return Palette.negative }
+        if emphasis.readyAbilities.contains(.character(character.id)) { return Palette.accent }
         return nil
     }
 
     /// Anything an armed ability cannot legally be pointed at steps back, so
-    /// the legal targets are the only lit cards on the mat.
+    /// the legal targets are the only lit cards on the mat. The card asking the
+    /// question stays where it is, so the player can see what they chose.
     private func isPushedBack(_ character: CharacterInPlay) -> Bool {
-        emphasis.isTargeting && !emphasis.abilityTargets.contains(character.id)
+        guard emphasis.isTargeting else { return false }
+        if emphasis.armedSource == .character(character.id) { return false }
+        return !emphasis.abilityTargets.contains(character.id)
     }
 
     private func description(of character: CharacterInPlay, card: Card?) -> String {
@@ -509,13 +635,33 @@ struct BoardSideView: View {
         if let card {
             if card.power != nil { parts.append("power \(character.effectivePower(of: card))") }
             if character.powerBonus != 0 {
-                let sign = character.powerBonus > 0 ? "+\(character.powerBonus)" : "\(character.powerBonus)"
-                parts.append("\(sign) this turn")
+                parts.append("\(signed(character.powerBonus)) power this turn")
+            }
+            if card.damage != nil { parts.append("damage \(character.effectiveDamage(of: card))") }
+            if character.damageBonus != 0 {
+                parts.append("\(signed(character.damageBonus)) damage this turn")
             }
             parts.append("health \(character.remainingHealth(of: card))")
         }
         parts.append(character.isRested ? "rested" : "ready")
         if character.summonedThisTurn { parts.append("summoned this turn") }
+        if character.hasRush { parts.append("has Rush") }
+        if character.isBarredFromAttacking { parts.append("cannot attack this turn") }
+
+        let source = AbilitySource.character(character.id)
+        if emphasis.armedSource == source {
+            parts.append("choosing a target for its ability")
+        } else if emphasis.readyAbilities.contains(source) {
+            parts.append("ability ready")
+        } else if emphasis.spentAbilities.contains(source) {
+            parts.append("ability used this turn")
+        }
+        if emphasis.abilityTargets.contains(character.id) {
+            parts.append("legal target for the chosen ability")
+        }
+        if card?.hasUnimplementedRules == true {
+            parts.append("prints rules the app does not fully apply")
+        }
         return parts.joined(separator: ", ")
     }
 }
@@ -533,7 +679,11 @@ struct BoardSideView: View {
         isActive: true,
         layout: BoardPreview.compactLayout,
         engine: engine,
-        emphasis: BoardEmphasis(attackers: true, leaderIsReady: true),
+        emphasis: BoardEmphasis(
+            attackers: true,
+            readyAbilities: [.leader],
+            leaderAbilityNote: "Activate: Main — 1 chakra"
+        ),
         chakraFace: database.chakraCards.first,
         onRead: { _ in },
         onSelectCharacter: { _ in },
@@ -555,7 +705,10 @@ struct BoardSideView: View {
         isActive: true,
         layout: BoardPreview.wideLayout,
         engine: engine,
-        emphasis: BoardEmphasis(leaderIsSpent: true),
+        emphasis: BoardEmphasis(
+            spentAbilities: [.leader],
+            leaderAbilityNote: "Used this turn"
+        ),
         chakraFace: database.chakraCards.first,
         onRead: { _ in },
         onSelectCharacter: { _ in },

@@ -28,6 +28,15 @@ final class GameEngine {
     /// Card lookups. The engine only ever reads from it.
     let database: CardDatabase
 
+    /// Hand positions the player nominated for the activation they are about to
+    /// make. `GameAction` carries a target on the board but not a choice from
+    /// hand, and only one printed step — placing cards back on the deck — asks
+    /// for one, so the board sets this immediately before applying the action
+    /// and the engine consumes it there. Left empty by the AI and by headless
+    /// replays, which the resolver handles by taking the most recently drawn
+    /// cards; that keeps a seeded game reproducible either way.
+    private(set) var handSelection: [Int] = []
+
     // MARK: Lifecycle
 
     /// Builds both sides from a configuration. Deck resolution never fails: a
@@ -94,8 +103,8 @@ final class GameEngine {
             return declareAttack(attackerID: attackerID, target: target, by: slot)
         case .declareBlock(let blockerID):
             return declareBlock(blockerID: blockerID, by: slot)
-        case .useLeaderAbility(let targetID):
-            return useLeaderAbility(targetID: targetID, by: slot)
+        case .useAbility(let source, let abilityIndex, let targetID):
+            return useAbility(source: source, abilityIndex: abilityIndex, targetID: targetID, by: slot)
         case .endPhase:
             return endPhase(by: slot)
         case .endTurn:
@@ -153,12 +162,18 @@ final class GameEngine {
         side.hand.remove(at: plan.handIndex)
         side.restChakra(plan.cost)
 
+        // Held so the arrival's On Summon boxes can be fired once the board has
+        // actually taken the body.
+        var summoned: UUID?
+
         if plan.asJutsu {
             side.trash.append(plan.card.id)
         } else if plan.card.type.isBody {
+            let identity = state.makeIdentifier()
+            summoned = identity
             side.characters.append(
                 CharacterInPlay(
-                    id: state.makeIdentifier(),
+                    id: identity,
                     cardID: plan.card.id,
                     isEX: plan.card.type == .exCharacter
                 )
@@ -174,6 +189,9 @@ final class GameEngine {
 
         journal.record(actor: slot.title, message: playMessage(for: plan))
         if plan.asJutsu { resolveJutsu(plan.card, by: slot) }
+        if let summoned {
+            fireAutomatic(.onSummon, source: .character(summoned), by: slot)
+        }
         return .success(())
     }
 
@@ -200,64 +218,183 @@ final class GameEngine {
         journal.record(actor: slot.title, message: "\(card.name) resolves: \(text)")
     }
 
-    // MARK: Leader ability
+    // MARK: Abilities
 
-    /// Activates the current player's Leader, once per turn.
+    /// Records the hand cards the player picked for the activation they are
+    /// about to make. Call it immediately before `apply(.useAbility…)`; the
+    /// engine clears it as soon as the activation resolves, so a stale pick can
+    /// never leak into the next one.
+    func nominateFromHand(_ indices: [Int]) {
+        handSelection = indices
+    }
+
+    /// Activates one printed ability box on a card the player controls.
     ///
-    /// Unlike the printed text on other cards, a Leader's ability is modelled
-    /// concretely (`LeaderAbility`) and resolved here, because it is the effect
-    /// a player reaches for every single turn.
-    private func useLeaderAbility(targetID: UUID?, by slot: PlayerSlot) -> Result<Void, GameError> {
-        let ability: LeaderAbility
-        switch planLeaderAbility(targetID: targetID, by: slot) {
-        case .success(let value): ability = value
+    /// Every card is treated the same way, Leaders included. The old engine
+    /// modelled a Leader's ability as one of four invented cases and resolved it
+    /// inline; the cards actually print several boxes each, so validation lives
+    /// in `planAbility` and the effects live in `AbilityResolver`.
+    private func useAbility(
+        source: AbilitySource,
+        abilityIndex: Int,
+        targetID: UUID?,
+        by slot: PlayerSlot
+    ) -> Result<Void, GameError> {
+        let plan: ResolvedAbility
+        switch planAbility(source: source, abilityIndex: abilityIndex, targetID: targetID, by: slot) {
+        case .success(let value): plan = value
         case .failure(let error): return .failure(error)
         }
+        resolve(plan)
+        return .success(())
+    }
 
-        var side = state[slot]
-        side.hasUsedLeaderAbility = true
-        state[slot] = side
+    /// Commits an activation the validator has already approved: the cost is
+    /// paid, the box is marked used, and the effects resolve against the board
+    /// the payment left behind.
+    ///
+    /// - Parameter note: a caveat about this resolution, logged directly under
+    ///   the headline so it reads before the steps it explains.
+    private func resolve(_ plan: ResolvedAbility, note: String? = nil) {
+        let slot = plan.controller
+        let paid = payCost(plan)
+        state[slot].markUsed(plan.use)
 
-        let leaderName = database.card(id: state[slot].leaderCardID)?.name ?? "The Leader"
-        var detail = ability.summary
-
-        switch ability {
-        case .drawCard:
-            // `draw` ends the game on an empty deck, so check before calling it
-            // rather than turning a Leader activation into a loss.
-            if state[slot].deck.isEmpty {
-                detail = "had no cards left to draw"
-            } else {
-                draw(1, for: slot)
-            }
-
-        case .restoreLife(let amount):
-            var side = state[slot]
-            side.life += amount
-            state[slot] = side
-
-        case .empowerCharacter(let power):
-            if let targetID, let index = state[slot].indexOfCharacter(id: targetID) {
-                var side = state[slot]
-                side.characters[index].powerBonus += power
-                state[slot] = side
-                let name = database.card(id: side.characters[index].cardID)?.name ?? "a character"
-                detail = "gave \(name) +\(power) power this turn"
-            }
-
-        case .weakenCharacter(let power):
-            let enemy = slot.opposing
-            if let targetID, let index = state[enemy].indexOfCharacter(id: targetID) {
-                var side = state[enemy]
-                side.characters[index].powerBonus -= power
-                state[enemy] = side
-                let name = database.card(id: side.characters[index].cardID)?.name ?? "a character"
-                detail = "left \(name) with \(power) less power this turn"
-            }
+        journal.record(actor: slot.title, message: headline(for: plan, paid: paid))
+        if let note {
+            journal.record(actor: slot.title, message: note)
         }
 
-        journal.record(actor: slot.title, message: "\(leaderName) activated: \(detail).")
-        return .success(())
+        let context = AbilityContext(
+            source: plan.source,
+            controller: slot,
+            card: plan.card,
+            ability: plan.ability,
+            targetID: plan.targetID,
+            handSelection: handSelection
+        )
+        handSelection = []
+
+        let outcome = AbilityResolver(database: database).resolve(context, in: &state)
+        for line in outcome.lines {
+            journal.record(actor: slot.title, message: line)
+        }
+
+        // Ending a game is the engine's decision, never the effect table's, so
+        // an ability decides one by exactly the routes a turn draw and a
+        // connecting attack already do.
+        if let defeated = outcome.defeated {
+            finish(winner: defeated.opposing, reason: .lifeDepleted)
+        }
+        if let deckedOut = outcome.deckedOut {
+            finish(winner: deckedOut.opposing, reason: .deckOut)
+        }
+    }
+
+    /// Pays an approved cost.
+    /// - Returns: phrases describing what was paid, for the journal line.
+    private func payCost(_ plan: ResolvedAbility) -> [String] {
+        let slot = plan.controller
+        var paid: [String] = []
+
+        if plan.ability.cost.chakra > 0 {
+            state[slot].restChakra(plan.ability.cost.chakra)
+            paid.append("flipped \(plan.ability.cost.chakra) chakra face-down")
+        }
+        for id in plan.sacrifices {
+            guard let cardID = state[slot].sendCharacterToTrash(id: id) else { continue }
+            paid.append("trashed \(database.card(id: cardID)?.name ?? cardID)")
+        }
+        return paid
+    }
+
+    /// The line that opens every resolution: who, which card, which trigger and
+    /// what it cost. The steps that follow say what actually happened.
+    private func headline(for plan: ResolvedAbility, paid: [String]) -> String {
+        let trigger = plan.ability.trigger.title.isEmpty ? "Ability" : plan.ability.trigger.title
+        let price = paid.isEmpty ? "no cost" : paid.joined(separator: " and ")
+        return "\(plan.card.name) — \(trigger), \(price)."
+    }
+
+    // MARK: Automatic triggers
+
+    /// Fires every box on one card that carries `trigger`.
+    ///
+    /// These resolve by themselves, so there is nobody to ask a question of.
+    /// Costs are paid where they can be and the box is skipped, out loud, where
+    /// they cannot.
+    private func fireAutomatic(_ trigger: AbilityTrigger, source: AbilitySource, by slot: PlayerSlot) {
+        guard !state.isFinished else { return }
+        guard let card = abilityCard(for: source, by: slot) else { return }
+
+        for index in card.abilities.indices where card.abilities[index].trigger == trigger {
+            guard !state.isFinished else { return }
+            // Re-read the card each pass: an earlier box may have removed the
+            // body this one is printed on.
+            guard abilityCard(for: source, by: slot) != nil else { return }
+            fire(card.abilities[index], index: index, card: card, source: source, by: slot)
+        }
+    }
+
+    /// Resolves one automatic box, or explains why it did not resolve.
+    private func fire(
+        _ ability: CardAbility,
+        index: Int,
+        card: Card,
+        source: AbilitySource,
+        by slot: PlayerSlot
+    ) {
+        let use = AbilityUse(source: source, abilityIndex: index)
+        guard !(ability.oncePerTurn && state[slot].hasUsed(use)) else { return }
+
+        let sacrifices = AbilityResolver.sacrifices(
+            for: ability.cost,
+            controller: slot,
+            in: state,
+            database: database
+        )
+        guard state[slot].readyChakra >= ability.cost.chakra,
+              sacrifices.count >= ability.cost.trashOwnCharacters else {
+            journal.record(
+                actor: slot.title,
+                message: "\(card.name) — \(ability.trigger.title) did not resolve: its cost of \(ability.cost.summary) could not be paid."
+            )
+            return
+        }
+
+        // These fire in the middle of something else, so there is no moment to
+        // put a picker in front of the player — and the engine will not choose
+        // for them. Choosing the only candidate would not even be safe: on an
+        // On Summon box the card that just arrived is usually the only card the
+        // scope reaches, so "the obvious choice" is the card knocking itself
+        // out. Scoped steps still resolve; a step wanting a chosen card says
+        // plainly that nobody chose one.
+        let note = ability.target.needsPlayerChoice
+            ? "\(card.name) asks you to \(ability.target.prompt.lowercased()), and \(ability.trigger.title) leaves no moment to ask — no card was chosen."
+            : nil
+
+        resolve(
+            ResolvedAbility(
+                source: source,
+                abilityIndex: index,
+                ability: ability,
+                card: card,
+                controller: slot,
+                targetID: nil,
+                sacrifices: sacrifices
+            ),
+            note: note
+        )
+    }
+
+    /// Fires the recovery step for a whole side: the Leader first, then every
+    /// body in the order it was summoned. The identities are snapshotted because
+    /// a recovery box can send a character to the Trash mid-loop.
+    private func fireRecovery(for slot: PlayerSlot) {
+        fireAutomatic(.recovery, source: .leader, by: slot)
+        for id in state[slot].characters.map(\.id) {
+            fireAutomatic(.recovery, source: .character(id), by: slot)
+        }
     }
 
     // MARK: Attacking
@@ -291,6 +428,11 @@ final class GameEngine {
             .map { name(of: $0) } ?? "the Leader"
         journal.record(actor: slot.title, message: "\(name(of: attacker)) attacks \(targetName).")
 
+        // "When Attacking" resolves on the declaration, before the defender is
+        // asked for a block — which is the whole point of those boxes.
+        fireAutomatic(.whenAttacking, source: .character(attackerID), by: slot)
+        guard !state.isFinished, state.pendingAttack != nil else { return .success(()) }
+
         if state[defendingSlot].readyCharacters.isEmpty {
             resolvePendingAttack(blockerID: nil)
         }
@@ -319,8 +461,8 @@ final class GameEngine {
         let attackingSlot = pending.attackingSlot
         let defendingSlot = pending.defendingSlot
 
-        guard let attacking = state[attackingSlot].character(id: pending.attackerID),
-              let attackerCard = database.card(id: attacking.cardID) else { return }
+        guard let attacker = state[attackingSlot].character(id: pending.attackerID),
+              let attackerCard = database.card(id: attacker.cardID) else { return }
 
         if let blockerID {
             let blockerName = state[defendingSlot].character(id: blockerID).map { name(of: $0) } ?? "a character"
@@ -338,7 +480,7 @@ final class GameEngine {
         switch pending.target {
         case .leader:
             journal.record(actor: defendingSlot.title, message: "Took the attack on the Leader.")
-            applyLeaderDamage(max(0, attackerCard.damage ?? 0), to: defendingSlot)
+            applyLeaderDamage(attacker.effectiveDamage(of: attackerCard), to: defendingSlot)
         case .character(let targetID):
             resolveBattle(
                 attackerSlot: attackingSlot,
@@ -434,6 +576,8 @@ final class GameEngine {
 
         state[slot].readyAll()
         journal.record(actor: slot.title, message: "Refreshed chakra and characters.")
+        fireRecovery(for: slot)
+        guard !state.isFinished else { return }
 
         state.phase = .draw
         if turn == 1 && slot == state.firstPlayer {
@@ -453,7 +597,7 @@ final class GameEngine {
         state.player.healAllCharacters()
         state.opponent.healAllCharacters()
 
-        // Power granted or removed by Leader abilities lasts only for the turn.
+        // Power, damage and Rush granted by abilities last only for the turn.
         state.player.clearTemporaryModifiers()
         state.opponent.clearTemporaryModifiers()
     }

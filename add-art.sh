@@ -55,7 +55,7 @@ if [ -d "$1" ]; then
     install_one "$f" "$stem"; count=$((count + 1))
   done < <(find "$1" -maxdepth 1 -type f \
              \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \
-                -o -iname '*.webp' -o -iname '*.heic' \) -print0)
+                -o -iname '*.webp' -o -iname '*.heic' -o -iname '*.avif' \) -print0)
   echo "Installed $count image(s)."
 else
   [ -f "$1" ] || { echo "No such file: $1" >&2; exit 1; }

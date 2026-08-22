@@ -285,8 +285,11 @@ private struct BoardStage: View {
     /// The attacker waiting for a target.
     @State private var selectedAttacker: UUID?
 
-    /// A Leader ability that has been chosen and is waiting for its target.
-    @State private var armedAbility: LeaderAbility?
+    /// A printed ability box the player has chosen, waiting for its target.
+    @State private var armedAbility: ArmedAbility?
+
+    /// The card, or the whole side, whose ability boxes are being offered.
+    @State private var abilityMenu: AbilityMenu?
 
     /// A decision held back until the player confirms it.
     @State private var confirmation: BoardConfirmation?
@@ -328,6 +331,15 @@ private struct BoardStage: View {
         }
         .overlay(alignment: .top) { bannerView }
         .overlay { resultOverlay }
+        .sheet(item: $abilityMenu) { menu in
+            AbilitySheet(
+                title: abilityMenuTitle(menu),
+                groups: abilityGroups(menu),
+                onChoose: { choose($0) },
+                onDismiss: { abilityMenu = nil }
+            )
+            .presentationDetents([.medium, .large])
+        }
         .sheet(isPresented: $showsJournal) {
             JournalSheet(journal: engine.journal) { showsJournal = false }
         }
@@ -471,6 +483,20 @@ private struct BoardStage: View {
 
     private var farSlot: PlayerSlot { nearSlot.opposing }
 
+    /// The side that may act right now and is the person holding the device.
+    ///
+    /// Usually whoever is taking the turn — but a declared attack hands the
+    /// next decision to the defender, and their "During Your Opponent's Attack"
+    /// boxes belong to them rather than to the attacker. Everything the board
+    /// offers is addressed to this side.
+    private var actingSlot: PlayerSlot? {
+        guard !engine.isFinished, !engine.isAwaitingMulligan else { return nil }
+        if let blocking = engine.blockingPlayer {
+            return isHumanControlled(blocking) ? blocking : nil
+        }
+        return isHumanControlled(engine.currentPlayer) ? engine.currentPlayer : nil
+    }
+
     /// Only the AI opponent plays itself.
     private func isHumanControlled(_ slot: PlayerSlot) -> Bool {
         configuration.mode == .versusAI ? slot == .player : true
@@ -507,18 +533,20 @@ private struct BoardStage: View {
             return "\(displayName(for: nearSlot)): keep this hand, or draw a new one."
         }
 
+        // A chosen ability owns the board until it is pointed at something, so
+        // its own prompt outranks whatever the turn would otherwise be asking.
+        if let armed = armedAbility {
+            return "\(armed.card.name) — \(armed.ability.target.prompt.lowercased()), or cancel."
+        }
+
         if let blocking = engine.blockingPlayer {
             return isHumanControlled(blocking)
-                ? "Choose a blocker, or take the attack on your Leader."
+                ? "Choose a blocker, take the attack on your Leader, or answer with an ability."
                 : "\(displayName(for: blocking)) is deciding whether to block."
         }
 
         guard isHumanControlled(engine.currentPlayer) else {
             return "\(displayName(for: engine.currentPlayer)) is taking their turn."
-        }
-
-        if let ability = armedAbility {
-            return "\(ability.summary): choose the character it acts on."
         }
 
         switch engine.phase {
@@ -539,33 +567,39 @@ private struct BoardStage: View {
 
     private func emphasis(for slot: PlayerSlot) -> BoardEmphasis {
         var value = BoardEmphasis()
-        guard !engine.isFinished else { return value }
+        guard let acting = actingSlot else { return value }
 
-        if let blocking = engine.blockingPlayer {
-            value.blockers = slot == blocking && isHumanControlled(blocking)
+        // A chosen ability owns the mat until it is pointed at something.
+        if let armed = armedAbility {
+            value.isTargeting = true
+            // Identities are unique across the whole board, so both sides can
+            // be handed the same set and each will only find its own.
+            value.abilityTargets = armed.targets
+            if slot == acting {
+                value.armedSource = armed.source
+                value.leaderAbilityNote = armed.source == .leader ? "Choosing a target" : nil
+            }
             return value
         }
 
-        guard isHumanControlled(engine.currentPlayer) else { return value }
-
-        // The Leader is either an unspent control or a spent one, and stays
-        // marked as spent for the rest of the turn either way.
-        if slot == engine.currentPlayer, engine.leaderCard(for: slot)?.leaderAbility != nil {
-            value.leaderIsReady = availableLeaderAbility != nil
-            value.leaderIsSpent = engine.side(slot).hasUsedLeaderAbility
+        // Only the acting side has anything to activate, so only it pays for
+        // the engine's legality walk.
+        if slot == acting {
+            let marks = abilityMarks(for: acting)
+            value.readyAbilities = Set(marks.ready.keys)
+            value.spentAbilities = marks.spent
+            value.partialAbilities = marks.partial
+            value.leaderAbilityNote = leaderAbilityNote(marks, for: acting)
         }
 
-        if armedAbility != nil {
-            // Identities are unique across the whole board, so both sides can
-            // be handed the same set and each will only find its own.
-            value.isTargeting = true
-            value.abilityTargets = armedTargetIDs
+        if let blocking = engine.blockingPlayer {
+            value.blockers = slot == blocking
             return value
         }
 
         guard engine.phase == .attack else { return value }
 
-        if slot == engine.currentPlayer {
+        if slot == acting {
             value.attackers = true
             value.selected = selectedAttacker
         } else if selectedAttacker != nil {
@@ -585,8 +619,8 @@ private struct BoardStage: View {
 
         // An armed ability owns the next tap. Reading the card is still useful,
         // so the tap lands in the reader and the board explains the rest.
-        if armedAbility != nil {
-            show("Choose a character for the ability, or cancel it first.")
+        if let armed = armedAbility {
+            show("\(armed.ability.target.prompt) for \(armed.card.name), or cancel it first.")
             return
         }
 
@@ -626,13 +660,18 @@ private struct BoardStage: View {
     private func tapCharacter(_ character: CharacterInPlay, on slot: PlayerSlot) {
         if let card = engine.card(for: character) { focusedCard = card }
 
-        if let ability = armedAbility {
-            guard armedTargetIDs.contains(character.id) else {
+        if let armed = armedAbility {
+            // Tapping the card that asked the question is the way back out.
+            guard armed.source != .character(character.id) else {
+                cancelAbility()
+                return
+            }
+            guard armed.targets.contains(character.id) else {
                 show(GameError.abilityNeedsTarget.message)
                 return
             }
             requestAbility(
-                ability,
+                armed,
                 targetID: character.id,
                 targetName: engine.card(for: character)?.name ?? "that character"
             )
@@ -649,9 +688,16 @@ private struct BoardStage: View {
             return
         }
 
-        guard isHumanControlled(engine.currentPlayer), engine.phase == .attack else { return }
+        guard let acting = actingSlot else { return }
 
-        if slot == engine.currentPlayer {
+        // Outside the attack phase a card you control is its own ability
+        // button. Inside it, the tap already means "attack with this".
+        guard engine.phase == .attack else {
+            if slot == acting { openAbilities(for: .character(character.id), on: acting) }
+            return
+        }
+
+        if slot == acting {
             guard engine.canAttack(characterID: character.id, by: slot) else {
                 show(GameError.attackerUnavailable.message)
                 return
@@ -676,18 +722,28 @@ private struct BoardStage: View {
     private func tapLeader(of slot: PlayerSlot) {
         if let leader = engine.leaderCard(for: slot) { focusedCard = leader }
 
-        // Your own Leader is the ability's button — and, once armed, its cancel.
-        // The enemy Leader is only ever an attack target. A Leader that has
-        // already gone this turn answers neither, and simply reads.
-        if slot == engine.currentPlayer, let ability = availableLeaderAbility {
-            armLeaderAbility(ability)
+        if let armed = armedAbility {
+            if armed.source == .leader, slot == actingSlot {
+                cancelAbility()
+            } else {
+                show(GameError.abilityNeedsTarget.message)
+            }
+            return
+        }
+
+        // Your own Leader is a card in play like any other: it prints ability
+        // boxes and a tap offers them. Nothing else on the mat wants that tap,
+        // because a Leader in this engine never attacks and never blocks. The
+        // enemy Leader is only ever an attack target.
+        if let acting = actingSlot, slot == acting {
+            openAbilities(for: .leader, on: acting)
             return
         }
 
         guard engine.blockingPlayer == nil,
-              isHumanControlled(engine.currentPlayer),
+              let acting = actingSlot,
               engine.phase == .attack,
-              slot != engine.currentPlayer,
+              slot != acting,
               let attackerID = selectedAttacker
         else { return }
 
@@ -727,63 +783,242 @@ private struct BoardStage: View {
 
         if let blocking = engine.blockingPlayer {
             guard isHumanControlled(blocking) else { return [] }
-            return [
+            var answers: [BoardAction] = [
                 BoardAction(id: "take", title: "Take it on the Leader", style: .primary) {
                     perform(.declareBlock(blockerID: nil), by: blocking)
                 }
             ]
+            // A declared attack is the window "During Your Opponent's Attack"
+            // boxes open in, and a tap on a body already means "block with it",
+            // so this is the only way those boxes are reachable.
+            if let ability = abilitiesAction(for: blocking) { answers.append(ability) }
+            return answers
         }
 
-        guard isHumanControlled(engine.currentPlayer) else { return [] }
+        guard let acting = actingSlot else { return [] }
 
         var actions: [BoardAction] = []
         let canEndPhase = engine.phase == .main || engine.phase == .attack
         actions.append(
             BoardAction(id: "phase", title: "End phase", style: .primary, isEnabled: canEndPhase) {
-                perform(.endPhase, by: engine.currentPlayer)
+                perform(.endPhase, by: acting)
             }
         )
 
-        // A Leader ability is once a turn and easy to forget, so it sits
-        // between the two phase controls rather than below them.
-        if let ability = availableLeaderAbility {
-            let isArmed = armedAbility != nil
-            actions.append(
-                BoardAction(
-                    id: "ability",
-                    title: isArmed ? "Cancel the ability" : ability.summary,
-                    shortTitle: isArmed ? "Cancel" : "Ability"
-                ) {
-                    if isArmed { cancelAbility() } else { armLeaderAbility(ability) }
-                }
-            )
-        }
+        // Abilities are easy to forget and now belong to every card in play, so
+        // the way to all of them sits between the two phase controls.
+        if let ability = abilitiesAction(for: acting) { actions.append(ability) }
 
         actions.append(BoardAction(id: "turn", title: "End turn") { requestEndTurn() })
         return actions
     }
 
-    /// The current player's unspent Leader ability, when they are the one at
-    /// the device. Read from `legalLeaderAbilities` so the button can never
-    /// offer an activation the engine would refuse.
-    private var availableLeaderAbility: LeaderAbility? {
-        guard !engine.isFinished,
-              engine.blockingPlayer == nil,
-              isHumanControlled(engine.currentPlayer),
-              !engine.legalLeaderAbilities(for: engine.currentPlayer).isEmpty
-        else { return nil }
-        return engine.leaderCard(for: engine.currentPlayer)?.leaderAbility
+    /// The one control that reaches every printed ability on the cards a player
+    /// controls.
+    ///
+    /// It exists as well as the card taps because a tap already means something
+    /// else in two places — choosing an attacker, and answering a declared
+    /// attack — and a response window is exactly where an "During Your
+    /// Opponent's Attack" box has to be reachable.
+    private func abilitiesAction(for slot: PlayerSlot) -> BoardAction? {
+        if armedAbility != nil {
+            return BoardAction(id: "ability", title: "Cancel the ability", shortTitle: "Cancel") {
+                cancelAbility()
+            }
+        }
+
+        // Counted per box rather than per action: the engine emits one action
+        // for every legal target, and three ways to point one ability is still
+        // one ability.
+        let boxes = Set(engine.legalAbilities(for: slot).compactMap { action -> String? in
+            guard case .useAbility(let source, let index, _) = action else { return nil }
+            return "\(source.key)-\(index)"
+        })
+        guard !boxes.isEmpty else { return nil }
+
+        return BoardAction(
+            id: "ability",
+            title: boxes.count == 1 ? "Use an ability" : "Use one of \(boxes.count) abilities",
+            shortTitle: "Abilities"
+        ) {
+            abilityMenu = .everything
+        }
     }
 
-    /// Resolves an untargeted ability straight away, and arms a targeted one so
-    /// the next tap on a character picks its target. Arming twice cancels.
-    private func armLeaderAbility(_ ability: LeaderAbility) {
-        guard ability.needsTarget else {
-            perform(.useLeaderAbility(targetID: nil), by: engine.currentPlayer)
+    // MARK: Abilities
+
+    /// What a side's cards are showing on the mat: which can activate a box
+    /// now, which have already spent one this turn, and which print a box the
+    /// app displays without resolving every step of.
+    private struct AbilityMarks {
+        /// Box positions each card may activate right now, in printed order.
+        var ready: [AbilitySource: [Int]] = [:]
+        var spent: Set<AbilitySource> = []
+        var partial: Set<AbilitySource> = []
+    }
+
+    /// Reads the marks straight off the engine, so a lit card is one the engine
+    /// will accept and a spent one is one it has already recorded.
+    private func abilityMarks(for slot: PlayerSlot) -> AbilityMarks {
+        var marks = AbilityMarks()
+
+        var offered: [AbilitySource: Set<Int>] = [:]
+        for action in engine.legalAbilities(for: slot) {
+            guard case .useAbility(let source, let index, _) = action else { continue }
+            offered[source, default: []].insert(index)
+        }
+        for (source, indices) in offered {
+            marks.ready[source] = indices.sorted()
+        }
+
+        for source in abilitySources(for: slot) {
+            guard let card = engine.abilityCard(for: source, by: slot) else { continue }
+            for index in card.abilities.indices where card.abilities[index].isActivated {
+                if !card.abilities[index].isFullyImplemented { marks.partial.insert(source) }
+                if engine.hasUsedAbility(source, abilityIndex: index, by: slot) {
+                    marks.spent.insert(source)
+                }
+            }
+        }
+        return marks
+    }
+
+    /// Every card on a side that could print an ability: the Leader, then the
+    /// bodies in the order they were summoned.
+    private func abilitySources(for slot: PlayerSlot) -> [AbilitySource] {
+        [.leader] + engine.side(slot).characters.map { AbilitySource.character($0.id) }
+    }
+
+    /// The short line drawn under the Leader.
+    ///
+    /// It names the price of the next activation rather than the ability's
+    /// text: the price is the part a player has to know before pressing
+    /// anything, and the text is one tap away in the picker.
+    private func leaderAbilityNote(_ marks: AbilityMarks, for slot: PlayerSlot) -> String? {
+        guard let card = engine.abilityCard(for: .leader, by: slot) else { return nil }
+
+        let ready = marks.ready[.leader] ?? []
+        if ready.count == 1, card.abilities.indices.contains(ready[0]) {
+            return card.abilities[ready[0]].activationHeadline
+        }
+        if ready.count > 1 { return "\(ready.count) abilities ready" }
+        return marks.spent.contains(.leader) ? "Used this turn" : nil
+    }
+
+    /// Opens the picker for one card, unless it prints nothing to show — in
+    /// which case the tap has already put the card in the reader, which is all
+    /// an ordinary body has to offer.
+    private func openAbilities(for source: AbilitySource, on slot: PlayerSlot) {
+        guard let card = engine.abilityCard(for: source, by: slot) else { return }
+        guard !card.activatedAbilities.isEmpty
+                || !engine.standingRules(for: source, by: slot).isEmpty
+        else { return }
+        abilityMenu = .card(source)
+    }
+
+    private func abilityMenuTitle(_ menu: AbilityMenu) -> String {
+        switch menu {
+        case .card(let source):
+            guard let acting = actingSlot,
+                  let card = engine.abilityCard(for: source, by: acting) else { return "Abilities" }
+            return card.name
+        case .everything:
+            return "Abilities"
+        }
+    }
+
+    /// Builds the offer list the picker draws, from the engine's own answers.
+    ///
+    /// One legal-action walk covers the whole sheet: the engine considers every
+    /// source and every target each time it is asked, and nothing can change
+    /// the answer while the sheet is up.
+    private func abilityGroups(_ menu: AbilityMenu) -> [AbilityGroup] {
+        guard let acting = actingSlot else { return [] }
+
+        let sources: [AbilitySource]
+        switch menu {
+        case .card(let source): sources = [source]
+        case .everything:       sources = abilitySources(for: acting)
+        }
+
+        var legalTargets: [String: Set<UUID>] = [:]
+        for action in engine.legalAbilities(for: acting) {
+            guard case .useAbility(let source, let index, let targetID) = action,
+                  let targetID else { continue }
+            legalTargets["\(source.key)-\(index)", default: []].insert(targetID)
+        }
+
+        return sources.compactMap { source -> AbilityGroup? in
+            guard let card = engine.abilityCard(for: source, by: acting) else { return nil }
+
+            let offers = card.abilities.indices
+                .filter { card.abilities[$0].isActivated }
+                .map { index -> AbilityOffer in
+                    let targets = legalTargets["\(source.key)-\(index)"] ?? []
+                    return AbilityOffer(
+                        source: source,
+                        index: index,
+                        ability: card.abilities[index],
+                        targets: targets,
+                        refusal: refusal(source: source, index: index,
+                                         targets: targets, by: acting)
+                    )
+                }
+
+            let standing = engine.standingRules(for: source, by: acting)
+            guard !offers.isEmpty || !standing.isEmpty else { return nil }
+            return AbilityGroup(source: source, card: card,
+                                offers: offers, standingRules: standing)
+        }
+    }
+
+    /// Why a box cannot be pressed, in the engine's own words.
+    ///
+    /// The engine checks the moment, then the once-per-turn tag, then the cost,
+    /// and only then the target — so asking it with no target names whichever
+    /// of those actually fails. A refusal of `abilityNeedsTarget` means every
+    /// other check passed, which is only a refusal when the board is holding
+    /// nothing legal to point at.
+    private func refusal(
+        source: AbilitySource,
+        index: Int,
+        targets: Set<UUID>,
+        by slot: PlayerSlot
+    ) -> String? {
+        switch engine.planAbility(source: source, abilityIndex: index, targetID: nil, by: slot) {
+        case .success:
+            return nil
+        case .failure(.abilityNeedsTarget):
+            return targets.isEmpty ? "There is no legal target on the board." : nil
+        case .failure(let error):
+            return error.message
+        }
+    }
+
+    /// A box the player pressed in the picker.
+    ///
+    /// An untargeted box resolves at once — its price was printed on the button
+    /// it was pressed from — and a targeted one arms the mat so the next tap
+    /// picks what it acts on.
+    private func choose(_ offer: AbilityOffer) {
+        abilityMenu = nil
+
+        guard let acting = actingSlot,
+              let card = engine.abilityCard(for: offer.source, by: acting) else { return }
+
+        guard offer.ability.target.needsPlayerChoice else {
+            useAbility(source: offer.source, index: offer.index, targetID: nil, by: acting)
             return
         }
+
         withAnimation(.easeOut(duration: 0.15)) {
-            armedAbility = armedAbility == ability ? nil : ability
+            armedAbility = ArmedAbility(
+                source: offer.source,
+                index: offer.index,
+                card: card,
+                ability: offer.ability,
+                targets: offer.targets
+            )
         }
     }
 
@@ -791,28 +1026,37 @@ private struct BoardStage: View {
         withAnimation(.easeOut(duration: 0.15)) { armedAbility = nil }
     }
 
-    /// The bodies the armed ability may legally be pointed at.
-    ///
-    /// Read straight off `legalLeaderAbilities`, each of which carries the
-    /// target it would use, so the ringed cards and the engine's own answer are
-    /// the same list rather than two guesses at it.
-    private var armedTargetIDs: Set<UUID> {
-        guard armedAbility != nil else { return [] }
-        let actions = engine.legalLeaderAbilities(for: engine.currentPlayer)
-        return Set(actions.compactMap { action -> UUID? in
-            guard case .useLeaderAbility(let targetID) = action else { return nil }
-            return targetID
-        })
-    }
-
     /// Picking a target resolves at once or asks first, exactly as picking an
     /// attack target does — it is the same preference either way.
-    private func requestAbility(_ ability: LeaderAbility, targetID: UUID, targetName: String) {
+    private func requestAbility(_ armed: ArmedAbility, targetID: UUID, targetName: String) {
+        guard let acting = actingSlot else { return }
         guard settings.targetConfirm == .askMe else {
-            perform(.useLeaderAbility(targetID: targetID), by: engine.currentPlayer)
+            useAbility(source: armed.source, index: armed.index, targetID: targetID, by: acting)
             return
         }
-        confirmation = .ability(ability, targetID: targetID, targetName: targetName)
+        confirmation = .ability(armed, targetID: targetID, targetName: targetName)
+    }
+
+    /// The one place an activation reaches the engine.
+    ///
+    /// Placing cards back on the deck is the only printed step that asks the
+    /// player for a card from hand, and `GameAction` has no room to carry one —
+    /// so the card lifted out of the hand strip is nominated immediately before
+    /// the action, which is exactly where the engine expects it. With nothing
+    /// lifted the engine falls back to the cards the ability just drew. A
+    /// refused action clears the nomination, so a stale pick can never leak
+    /// into the next activation.
+    private func useAbility(
+        source: AbilitySource,
+        index: Int,
+        targetID: UUID?,
+        by slot: PlayerSlot
+    ) {
+        engine.nominateFromHand(selectedHandIndex.map { [$0] } ?? [])
+        let action = GameAction.useAbility(source: source, abilityIndex: index, targetID: targetID)
+        if !perform(action, by: slot) {
+            engine.nominateFromHand([])
+        }
     }
 
     private func requestEndTurn() {
@@ -1007,13 +1251,48 @@ private struct BoardStage: View {
         return "\(reason.title) — \(reason.detail)."
     }
 
+    // MARK: Ability state
+
+    /// A printed ability box the player has chosen, waiting for its target.
+    private struct ArmedAbility: Equatable {
+
+        let source: AbilitySource
+        let index: Int
+
+        /// The card the box is printed on, for the prompt and the log line.
+        let card: Card
+
+        let ability: CardAbility
+
+        /// The board identities the engine will accept, taken from its own
+        /// legal action list rather than worked out a second time here.
+        let targets: Set<UUID>
+    }
+
+    /// What the ability picker is showing.
+    private enum AbilityMenu: Identifiable {
+
+        /// One card the player tapped on the mat.
+        case card(AbilitySource)
+
+        /// Everything the acting side controls, opened from the action stack.
+        case everything
+
+        var id: String {
+            switch self {
+            case .card(let source): return source.key
+            case .everything:       return "everything"
+            }
+        }
+    }
+
     // MARK: Confirmations
 
     /// A decision the board holds until the player says yes.
     private enum BoardConfirmation: Identifiable {
         case jutsu(HandCard)
         case attack(attackerID: UUID, target: AttackTarget, targetName: String)
-        case ability(LeaderAbility, targetID: UUID, targetName: String)
+        case ability(ArmedAbility, targetID: UUID, targetName: String)
         case endTurn
         case leave
 
@@ -1038,11 +1317,11 @@ private struct BoardStage: View {
     private var confirmationTitle: String {
         guard let confirmation else { return "" }
         switch confirmation {
-        case .jutsu(let handCard): return handCard.card.name
-        case .attack:              return "Declare the attack?"
-        case .ability:             return "Use your Leader?"
-        case .endTurn:             return "End your turn?"
-        case .leave:               return "Leave the game?"
+        case .jutsu(let handCard):   return handCard.card.name
+        case .attack:               return "Declare the attack?"
+        case .ability(let armed, _, _): return "Use \(armed.card.name)?"
+        case .endTurn:              return "End your turn?"
+        case .leave:                return "Leave the game?"
         }
     }
 
@@ -1056,8 +1335,14 @@ private struct BoardStage: View {
             """
         case .attack(_, _, let targetName):
             return "Attack \(targetName)."
-        case .ability(let ability, _, let targetName):
-            return "\(ability.summary): \(targetName)."
+        case .ability(let armed, _, let targetName):
+            // The price, the target and the printed words, before anything is
+            // spent — and the caveat, when the app will not apply all of it.
+            var text = "\(armed.ability.activationHeadline), on \(targetName).\n\n\(armed.ability.text)"
+            if !armed.ability.isFullyImplemented {
+                text += "\n\nThe app will not apply every step of this ability."
+            }
+            return text
         case .endTurn:
             return "Anything left in the attack phase will be given up."
         case .leave:
@@ -1083,9 +1368,11 @@ private struct BoardStage: View {
             }
             Button("Cancel", role: .cancel) { confirmation = nil }
 
-        case .ability(_, let targetID, _):
+        case .ability(let armed, let targetID, _):
             Button("Use the ability") {
-                perform(.useLeaderAbility(targetID: targetID), by: engine.currentPlayer)
+                guard let acting = actingSlot else { return }
+                useAbility(source: armed.source, index: armed.index,
+                           targetID: targetID, by: acting)
             }
             Button("Cancel", role: .cancel) { confirmation = nil }
 

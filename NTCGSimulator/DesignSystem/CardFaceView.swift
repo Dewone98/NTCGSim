@@ -461,8 +461,8 @@ struct CardFaceView: View {
                     .padding(.top, 2)
             }
 
-            if size.showsEffectText, let ability = card.leaderAbility {
-                abilityLine(ability)
+            if size.showsEffectText, !card.activatedAbilities.isEmpty {
+                abilityLines
             }
         }
         .padding(.horizontal, size == .large ? 8 : 4)
@@ -519,7 +519,7 @@ struct CardFaceView: View {
 
             Spacer(minLength: 0)
 
-            if card.leaderAbility != nil {
+            if !card.activatedAbilities.isEmpty {
                 abilityBadge
             }
             if size.showsTraits {
@@ -555,8 +555,12 @@ struct CardFaceView: View {
             }
     }
 
-    /// Marks a Leader that has an ability to activate, so the once-a-turn play
-    /// is discoverable from the card and not only from the board.
+    /// Marks a card carrying a box the player can press a button for, so the
+    /// play is discoverable from the card and not only from the board.
+    ///
+    /// It is the activated boxes and only those: a passive rule or an On Summon
+    /// trigger fires on its own and needs no invitation, and badging every card
+    /// that prints anything at all would badge almost the whole set.
     private var abilityBadge: some View {
         HStack(spacing: 2) {
             Image(systemName: "sparkles")
@@ -574,16 +578,39 @@ struct CardFaceView: View {
         .background(Palette.accent, in: Capsule())
     }
 
-    private func abilityLine(_ ability: LeaderAbility) -> some View {
+    /// One line per box the player can activate, at inspector size only.
+    ///
+    /// It states the terms rather than the rules: the printed text is already
+    /// set out in full directly above, and repeating it here would fill the
+    /// name bar with the same sentence twice.
+    private var abilityLines: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(card.activatedAbilities.enumerated()), id: \.offset) { box in
+                abilityLine(box.element)
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private func abilityLine(_ ability: CardAbility) -> some View {
         HStack(spacing: 4) {
             Image(systemName: "sparkles")
                 .font(.system(size: 11, weight: .bold))
-            Text(ability.summary)
+            Text(activationTerms(ability))
                 .font(Typeface.label(11))
                 .fixedSize(horizontal: false, vertical: true)
         }
         .foregroundStyle(Palette.warning)
-        .padding(.top, 2)
+    }
+
+    /// "Activate: Main · 1 chakra · once per turn" — when the box may be used
+    /// and what using it costs, in that order, because the first thing a player
+    /// asks of an ability is whether they can reach it at all.
+    private func activationTerms(_ ability: CardAbility) -> String {
+        var parts = [ability.trigger.title]
+        parts.append(ability.cost.isFree ? "no cost" : ability.cost.summary)
+        if ability.oncePerTurn { parts.append("once per turn") }
+        return parts.joined(separator: " · ")
     }
 
     private var typeLineTint: Color {
@@ -632,8 +659,8 @@ struct CardFaceView: View {
         if let damage = card.damage { parts.append("damage \(damage)") }
         if let health = card.health { parts.append("health \(health)") }
         if let life = card.life { parts.append("life \(life)") }
-        if let ability = card.leaderAbility {
-            parts.append("Leader ability, \(ability.summary)")
+        for ability in card.activatedAbilities {
+            parts.append("activated ability, \(activationTerms(ability))")
         }
         if !card.effect.isEmpty { parts.append(card.effect) }
         return parts.joined(separator: ", ")
@@ -1638,19 +1665,41 @@ struct CardBackView: View {
 
 /// A hand-built pool, so the previews do not depend on what happens to be in
 /// `cards.json` or on the player's imported set.
+///
+/// The two cards that carry abilities carry their real printings, so the badge
+/// and the activation line are exercised against the shape live data actually
+/// has. The Support cards are invented, because the shipped set prints none and
+/// the Support face treatment would otherwise never be seen.
 private func previewPool() -> [Card] {
     [
         Card(id: "N-001", name: "Naruto Uzumaki", type: .leader, color: .red,
              rarity: .leader, setCode: "01",
-             traits: ["Team 7", "Jinchuriki"],
-             power: 5, damage: 1, life: 15,
-             effect: "Once per turn, when a Character you control is sent to the Trash, draw a card.",
-             leaderAbility: .drawCard),
-        Card(id: "N-007", name: "Minato Namikaze", type: .character, color: .red,
-             rarity: .superRare, setCode: "01",
-             traits: ["Hidden Leaf Village", "The Five Kage"],
-             cost: 5, power: 8, damage: 2, health: 6,
-             effect: "When summoned, return one opposing Character to its owner's hand."),
+             traits: ["Wind", "Jinchuriki", "Hidden Leaf Village", "Team 7"],
+             power: 3, damage: 1, life: 15,
+             effect: "[Activate: Main] Flip 1 of your CHAKRA face-down and choose 1 Character: The chosen card gets +3 power during this turn.",
+             abilities: [
+                CardAbility(
+                    trigger: .activateMain,
+                    cost: AbilityCost(chakra: 1),
+                    target: .anyCharacter,
+                    text: "Flip 1 of your CHAKRA face-down and choose 1 Character: The chosen card gets +3 power during this turn.",
+                    effects: [.buffPower(3, .anyCharacter)]
+                )
+             ]),
+        Card(id: "N-004", name: "Naruto Uzumaki", type: .character, color: .red,
+             rarity: .common, setCode: "01",
+             traits: ["Special", "Jinchuriki", "Hidden Leaf Village", "Team 7"],
+             cost: 2, power: 5, damage: 1, health: 4,
+             effect: "[During Your Main] K.O. all Characters.",
+             supportText: "Support: may be played as a jutsu instead of being summoned.",
+             abilities: [
+                CardAbility(
+                    trigger: .duringYourMain,
+                    cost: AbilityCost(chakra: 2),
+                    text: "K.O. all Characters.",
+                    effects: [.knockOut(.allCharacters)]
+                )
+             ]),
         Card(id: "N-030", name: "Sakura Haruno", type: .exCharacter, color: .blue,
              rarity: .rare, setCode: "01",
              traits: ["Team 7", "Medical"],

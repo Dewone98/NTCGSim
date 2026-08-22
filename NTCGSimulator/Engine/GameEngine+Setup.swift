@@ -231,6 +231,19 @@ extension GameEngine {
         }
         return nil
     }
+
+    /// The printed card behind an ability source, or `nil` when that card is not
+    /// on `slot`'s side of the board. Returning `nil` for an absent body is what
+    /// lets every ability path share one "is it still there" check.
+    func abilityCard(for source: AbilitySource, by slot: PlayerSlot) -> Card? {
+        switch source {
+        case .leader:
+            return database.card(id: state[slot].leaderCardID)
+        case .character(let id):
+            guard let character = state[slot].character(id: id) else { return nil }
+            return database.card(id: character.cardID)
+        }
+    }
 }
 
 // MARK: - Queries
@@ -255,6 +268,39 @@ extension GameEngine {
     func canBlock(characterID: UUID) -> Bool {
         guard let pending = state.pendingAttack else { return false }
         return state[pending.defendingSlot].character(id: characterID)?.isReady == true
+    }
+
+    /// Whether one specific activation would be accepted right now.
+    func canUseAbility(
+        source: AbilitySource,
+        abilityIndex: Int,
+        targetID: UUID? = nil,
+        by slot: PlayerSlot
+    ) -> Bool {
+        planAbility(source: source, abilityIndex: abilityIndex, targetID: targetID, by: slot).isSuccess
+    }
+
+    /// Whether a "Once Per Turn" box has already been spent this turn.
+    func hasUsedAbility(_ source: AbilitySource, abilityIndex: Int, by slot: PlayerSlot) -> Bool {
+        state[slot].hasUsed(AbilityUse(source: source, abilityIndex: abilityIndex))
+    }
+
+    /// The standing rules a card in play is under.
+    ///
+    /// `.passive` boxes are always true and `.yourTurn` boxes are true while
+    /// their controller is the active player. Neither ever fires — there is no
+    /// moment for the engine to resolve them at — so this exists purely so the
+    /// board can tell a player which printed rules are currently in force,
+    /// rather than leaving them to read the card and guess.
+    func standingRules(for source: AbilitySource, by slot: PlayerSlot) -> [CardAbility] {
+        guard let card = abilityCard(for: source, by: slot) else { return [] }
+        return card.abilities.filter { ability in
+            switch ability.trigger {
+            case .passive:  return true
+            case .yourTurn: return slot == state.current
+            default:        return false
+            }
+        }
     }
 }
 
@@ -294,6 +340,14 @@ extension GameEngine {
         if asJutsu {
             guard card.hasSupportLine else { return .failure(.noSupportLine(card.name)) }
         } else {
+            // Summon Requirements cards print "Cannot be summoned normally".
+            // Playing one from hand for its cost is exactly what that forbids,
+            // so the normal summon is refused here — the printed requirement is
+            // the only door in, and the app does not yet open it.
+            guard !card.cannotBeSummonedNormally else {
+                return .failure(.cannotBeSummonedNormally(card.name))
+            }
+
             switch card.type {
             case .character, .exCharacter:
                 guard side.characters.count < GameRules.maxCharacters else {
@@ -315,61 +369,145 @@ extension GameEngine {
         return .success(PlayPlan(handIndex: handIndex, card: card, asJutsu: asJutsu, cost: cost))
     }
 
-    /// Validates a Leader activation, returning the ability to resolve.
-    ///
-    /// Shared by `apply` and `legalActions`, so a Leader button can never be
-    /// offered for an activation the engine would then refuse.
-    func planLeaderAbility(targetID: UUID?, by slot: PlayerSlot) -> Result<LeaderAbility, GameError> {
-        guard !state.isFinished else { return .failure(.gameOver) }
-        guard slot == state.current else { return .failure(.notYourTurn) }
-        guard state.phase == .main else { return .failure(.wrongPhase(state.phase)) }
-        guard state.pendingAttack == nil else { return .failure(.attackAlreadyPending) }
+    /// A validated ability activation, ready for the engine to commit.
+    struct ResolvedAbility {
+        let source: AbilitySource
+        let abilityIndex: Int
+        let ability: CardAbility
+        let card: Card
+        let controller: PlayerSlot
+        let targetID: UUID?
 
-        let side = state[slot]
-        guard !side.hasUsedLeaderAbility else { return .failure(.leaderAbilityAlreadyUsed) }
+        /// The characters that will pay the cost's trash requirement, already
+        /// checked to exist and to match the cost's trait and power filters.
+        let sacrifices: [UUID]
 
-        guard let leader = database.card(id: side.leaderCardID) else {
-            return .failure(.unknownCard(side.leaderCardID))
-        }
-        guard let ability = leader.leaderAbility else {
-            return .failure(.leaderHasNoAbility(leader.name))
-        }
-
-        if ability.needsFriendlyTarget {
-            guard let targetID, side.character(id: targetID) != nil else {
-                return .failure(.abilityNeedsTarget)
-            }
-        }
-        if ability.needsEnemyTarget {
-            guard let targetID, state[slot.opposing].character(id: targetID) != nil else {
-                return .failure(.abilityNeedsTarget)
-            }
-        }
-
-        return .success(ability)
+        /// The key this activation occupies in the once-per-turn set.
+        var use: AbilityUse { AbilityUse(source: source, abilityIndex: abilityIndex) }
     }
 
-    /// Every Leader activation available right now: one action per legal
-    /// target for a targeted ability, or a single untargeted action.
-    func legalLeaderAbilities(for slot: PlayerSlot) -> [GameAction] {
-        guard
-            let leader = database.card(id: state[slot].leaderCardID),
-            let ability = leader.leaderAbility
-        else { return [] }
+    /// Validates an activation of one printed ability box, returning everything
+    /// the engine needs to commit it.
+    ///
+    /// Shared by `apply`, `canUseAbility` and `legalAbilities`, so a button can
+    /// never be offered for an activation the engine would then refuse. The
+    /// checks run in the order a player would ask them: is the game live, is it
+    /// my moment, is the card here, have I already used it, can I pay, is the
+    /// target legal.
+    func planAbility(
+        source: AbilitySource,
+        abilityIndex: Int,
+        targetID: UUID?,
+        by slot: PlayerSlot
+    ) -> Result<ResolvedAbility, GameError> {
+        guard !state.isFinished else { return .failure(.gameOver) }
 
-        guard ability.needsTarget else {
-            return planLeaderAbility(targetID: nil, by: slot).isSuccess
-                ? [.useLeaderAbility(targetID: nil)]
-                : []
+        // The card has to still be on the board, and on this player's side.
+        guard let card = abilityCard(for: source, by: slot) else {
+            return .failure(.abilitySourceNotInPlay)
+        }
+        guard card.abilities.indices.contains(abilityIndex) else {
+            return .failure(.noSuchAbility(card.name))
+        }
+        let ability = card.abilities[abilityIndex]
+
+        // The trigger decides the moment — and, for a response, who is acting.
+        switch ability.trigger {
+        case .activateMain, .duringYourMain:
+            guard slot == state.current else { return .failure(.notYourTurn) }
+            guard state.phase == .main else { return .failure(.wrongPhase(state.phase)) }
+            guard state.pendingAttack == nil else { return .failure(.attackAlreadyPending) }
+
+        case .opponentsAttack:
+            // The one activation that belongs to the player who is not on turn.
+            guard let pending = state.pendingAttack else { return .failure(.noAttackPending) }
+            guard slot == pending.defendingSlot else { return .failure(.notYourTurn) }
+
+        case .passive, .yourTurn, .onSummon, .whenAttacking,
+             .recovery, .summonRequirement, .support:
+            return .failure(.abilityNotActivated(card.name))
         }
 
-        let candidates = ability.needsFriendlyTarget
-            ? state[slot].characters
-            : state[slot.opposing].characters
+        // "Once Per Turn" is tracked per box, not per player.
+        let use = AbilityUse(source: source, abilityIndex: abilityIndex)
+        if ability.oncePerTurn, state[slot].hasUsed(use) {
+            return .failure(.abilityAlreadyUsed(card.name))
+        }
 
-        return candidates
-            .filter { planLeaderAbility(targetID: $0.id, by: slot).isSuccess }
-            .map { .useLeaderAbility(targetID: $0.id) }
+        // The cost, in the two currencies a box can ask for.
+        let available = state[slot].readyChakra
+        guard available >= ability.cost.chakra else {
+            return .failure(.notEnoughChakra(required: ability.cost.chakra, available: available))
+        }
+        let sacrifices = AbilityResolver.sacrifices(
+            for: ability.cost,
+            controller: slot,
+            in: state,
+            database: database
+        )
+        guard sacrifices.count >= ability.cost.trashOwnCharacters else {
+            return .failure(.notEnoughCharactersToTrash(
+                required: ability.cost.trashOwnCharacters,
+                available: sacrifices.count
+            ))
+        }
+
+        // The target, when the scope asks the player for one.
+        if ability.target.needsPlayerChoice {
+            let candidates = AbilityResolver.candidates(
+                for: ability.target,
+                controller: slot,
+                in: state
+            )
+            guard let targetID, candidates.contains(where: { $0.id == targetID }) else {
+                return .failure(.abilityNeedsTarget)
+            }
+        }
+
+        return .success(ResolvedAbility(
+            source: source,
+            abilityIndex: abilityIndex,
+            ability: ability,
+            card: card,
+            controller: slot,
+            targetID: ability.target.needsPlayerChoice ? targetID : nil,
+            sacrifices: sacrifices
+        ))
+    }
+
+    /// Every activation `slot` may make right now, one action per legal target.
+    ///
+    /// Replaces the Leader-only list: the Leader is simply the first source
+    /// considered, and every body in the Characters row is considered after it.
+    /// `legalActions(for:)` folds this in, so the board and the AI are always
+    /// looking at the same set.
+    func legalAbilities(for slot: PlayerSlot) -> [GameAction] {
+        guard !state.isFinished else { return [] }
+
+        var sources: [AbilitySource] = [.leader]
+        sources.append(contentsOf: state[slot].characters.map { AbilitySource.character($0.id) })
+
+        var actions: [GameAction] = []
+        for source in sources {
+            guard let card = abilityCard(for: source, by: slot) else { continue }
+
+            for index in card.abilities.indices where card.abilities[index].isActivated {
+                let scope = card.abilities[index].target
+
+                guard scope.needsPlayerChoice else {
+                    if planAbility(source: source, abilityIndex: index, targetID: nil, by: slot).isSuccess {
+                        actions.append(.useAbility(source: source, abilityIndex: index, targetID: nil))
+                    }
+                    continue
+                }
+
+                for candidate in AbilityResolver.candidates(for: scope, controller: slot, in: state)
+                where planAbility(source: source, abilityIndex: index, targetID: candidate.id, by: slot).isSuccess {
+                    actions.append(.useAbility(source: source, abilityIndex: index, targetID: candidate.id))
+                }
+            }
+        }
+        return actions
     }
 
     /// Validates that a character may declare an attack this turn.
@@ -404,6 +542,9 @@ extension GameEngine {
             guard slot == pending.defendingSlot else { return [.concede] }
             var blocks: [GameAction] = [.declareBlock(blockerID: nil)]
             blocks.append(contentsOf: state[slot].readyCharacters.map { GameAction.declareBlock(blockerID: $0.id) })
+            // A declared attack is the window "During Your Opponent's Attack"
+            // abilities open in, so the defender's activations belong here too.
+            blocks.append(contentsOf: legalAbilities(for: slot))
             blocks.append(.concede)
             return blocks
         }
@@ -421,7 +562,7 @@ extension GameEngine {
                     actions.append(.playCard(handIndex: index, asJutsu: true))
                 }
             }
-            actions.append(contentsOf: legalLeaderAbilities(for: slot))
+            actions.append(contentsOf: legalAbilities(for: slot))
             actions.append(.endPhase)
             actions.append(.endTurn)
 

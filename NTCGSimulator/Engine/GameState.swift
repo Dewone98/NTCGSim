@@ -134,9 +134,26 @@ struct CharacterInPlay: Identifiable, Hashable, Codable {
     /// Summoning sickness: cleared by the owner's next refresh.
     var summonedThisTurn: Bool = true
 
-    /// Power added or removed until the end of the turn, from Leader abilities
-    /// and other temporary effects. Cleared during end-of-turn cleanup.
+    /// Power added or removed until the end of the turn, from abilities and
+    /// other temporary effects. Cleared during end-of-turn cleanup.
     var powerBonus: Int = 0
+
+    /// Damage added or removed until the end of the turn. The mirror of
+    /// `powerBonus` for the value a connecting attack takes off a Leader.
+    var damageBonus: Int = 0
+
+    /// Rush: the card may attack on the turn it arrived. Granted by abilities
+    /// and cleared with the rest of the turn's temporary modifiers.
+    var hasRush: Bool = false
+
+    /// Announced by a `cannotAttackNextTurn` effect. The owner's next refresh
+    /// promotes it into `isBarredFromAttacking`, which is what actually bites —
+    /// a ban declared during one turn only takes hold on the next one.
+    var isBarredNextTurn: Bool = false
+
+    /// True while an attack ban is in force. Set at refresh from
+    /// `isBarredNextTurn`, and cleared by the refresh after that.
+    var isBarredFromAttacking: Bool = false
 
     /// Health left before the character is sent to the Trash.
     func remainingHealth(of card: Card) -> Int {
@@ -149,11 +166,34 @@ struct CharacterInPlay: Identifiable, Hashable, Codable {
         max(0, (card.power ?? 0) + powerBonus)
     }
 
+    /// Damage for combat purposes: what is printed, plus any temporary
+    /// modifier, never below zero.
+    func effectiveDamage(of card: Card) -> Int {
+        max(0, (card.damage ?? 0) + damageBonus)
+    }
+
     /// Ready characters may block.
     var isReady: Bool { !isRested }
 
-    /// A character may attack once per turn, and never on the turn it arrived.
-    var canAttack: Bool { !isRested && !summonedThisTurn }
+    /// A character may attack once per turn, never on the turn it arrived
+    /// unless it has Rush, and never while an ability is holding it back.
+    var canAttack: Bool {
+        guard !isRested, !isBarredFromAttacking else { return false }
+        return !summonedThisTurn || hasRush
+    }
+}
+
+// MARK: - Ability use
+
+/// One printed ability box on one card in play.
+///
+/// "Once Per Turn" is a property of the box, not of the player: two characters
+/// each carrying their own once-per-turn ability must both be usable in the
+/// same turn, and a card printing two boxes must be able to use each of them.
+/// Keying the used set this way is what makes that true.
+struct AbilityUse: Hashable, Codable {
+    let source: AbilitySource
+    let abilityIndex: Int
 }
 
 // MARK: - Player side
@@ -195,9 +235,15 @@ struct PlayerSide: Codable, Hashable {
     /// Cards removed from the game entirely.
     var exclusion: [String] = []
 
-    /// Whether this player has activated their Leader's ability this turn.
-    /// Cleared at the start of each of their turns.
-    var hasUsedLeaderAbility: Bool = false
+    /// Whether this side's Leader is rested. Nothing in the implemented ruleset
+    /// asks a Leader to attack or block, so this is board state the abilities
+    /// that say "rest this card" need in order to mean anything, and the board
+    /// draws it.
+    var leaderIsRested: Bool = false
+
+    /// Every ability box this side has used this turn. Cleared at the start of
+    /// each of their turns, so "Once Per Turn" resets with the refresh.
+    var usedAbilities: Set<AbilityUse> = []
 
     /// Whether this player used their one mulligan.
     var hasMulliganed: Bool = false
@@ -231,6 +277,9 @@ struct PlayerSide: Codable, Hashable {
         characters.firstIndex { $0.id == id }
     }
 
+    /// Whether a particular ability box has already been used this turn.
+    func hasUsed(_ use: AbilityUse) -> Bool { usedAbilities.contains(use) }
+
     // MARK: Mutation
 
     /// Rests the first `count` ready Chakra. Deterministic order keeps replays
@@ -244,20 +293,39 @@ struct PlayerSide: Codable, Hashable {
         }
     }
 
+    /// Turns every Chakra card face-up again, which several cards print as an
+    /// effect in its own right rather than only as part of the refresh step.
+    /// - Returns: how many were face-down, so the log can say what changed.
+    @discardableResult
+    mutating func readyAllChakra() -> Int {
+        let wasRested = restedChakra
+        for index in chakra.indices { chakra[index].isRested = false }
+        return wasRested
+    }
+
+    /// Marks an ability box used for the rest of this turn.
+    mutating func markUsed(_ use: AbilityUse) { usedAbilities.insert(use) }
+
     /// Refresh step: stand everything up and clear summoning sickness.
     mutating func readyAll() {
         for index in chakra.indices { chakra[index].isRested = false }
         for index in characters.indices {
             characters[index].isRested = false
             characters[index].summonedThisTurn = false
+            // A ban announced last turn is what bites now, and only for now.
+            characters[index].isBarredFromAttacking = characters[index].isBarredNextTurn
+            characters[index].isBarredNextTurn = false
         }
-        hasUsedLeaderAbility = false
+        leaderIsRested = false
+        usedAbilities.removeAll()
     }
 
-    /// End-of-turn cleanup: temporary power modifiers expire.
+    /// End-of-turn cleanup: temporary modifiers expire.
     mutating func clearTemporaryModifiers() {
         for index in characters.indices {
             characters[index].powerBonus = 0
+            characters[index].damageBonus = 0
+            characters[index].hasRush = false
         }
     }
 

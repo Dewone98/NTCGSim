@@ -34,6 +34,45 @@ enum AttackTarget: Hashable, Codable {
     }
 }
 
+// MARK: - Ability source
+
+/// Which card an activation is addressed to.
+///
+/// A side only ever has one Leader, so a Leader is named by its role rather
+/// than by an in-play identity it does not have. Everything else on the board
+/// that prints an ability is a body in the Characters row, addressed by the
+/// identity it was given when it arrived.
+enum AbilitySource: Hashable, Codable {
+
+    /// The activating player's own Leader.
+    case leader
+
+    /// A body in the activating player's Characters row.
+    case character(UUID)
+
+    /// The in-play identity, when the source is a body on the board.
+    var characterID: UUID? {
+        if case .character(let id) = self { return id }
+        return nil
+    }
+
+    /// Short label for confirmation prompts and the log.
+    var title: String {
+        switch self {
+        case .leader:    return "Leader"
+        case .character: return "Character"
+        }
+    }
+
+    /// Stable key used to build `GameAction.id`.
+    var key: String {
+        switch self {
+        case .leader:            return "leader"
+        case .character(let id): return id.uuidString
+        }
+    }
+}
+
 // MARK: - Action
 
 /// One player decision. `GameEngine.apply(_:by:)` is the only way a decision
@@ -53,9 +92,12 @@ enum GameAction: Hashable, Codable, Identifiable {
     /// Answer a declared attack. `nil` takes the attack unblocked.
     case declareBlock(blockerID: UUID?)
 
-    /// Activate your Leader's ability, once per turn. `targetID` names the
-    /// character the ability acts on, when it needs one.
-    case useLeaderAbility(targetID: UUID?)
+    /// Activate one printed ability box on a card you control.
+    ///
+    /// `abilityIndex` is the box's position in the card's printed order, so the
+    /// same card can offer several activations at once. `targetID` names the
+    /// card the ability acts on, when its scope asks the player to choose one.
+    case useAbility(source: AbilitySource, abilityIndex: Int, targetID: UUID?)
 
     /// Move from main to attack, or from attack to end.
     case endPhase
@@ -77,8 +119,8 @@ enum GameAction: Hashable, Codable, Identifiable {
             return "attack-\(attacker.uuidString)-\(target.characterID?.uuidString ?? "leader")"
         case .declareBlock(let blocker):
             return "block-\(blocker?.uuidString ?? "none")"
-        case .useLeaderAbility(let target):
-            return "leader-ability-\(target?.uuidString ?? "none")"
+        case .useAbility(let source, let index, let target):
+            return "ability-\(source.key)-\(index)-\(target?.uuidString ?? "none")"
         case .endPhase:
             return "end-phase"
         case .endTurn:
@@ -100,8 +142,8 @@ enum GameAction: Hashable, Codable, Identifiable {
             return target == .leader ? "Attack the Leader" : "Attack a character"
         case .declareBlock(let blocker):
             return blocker == nil ? "Take it on the Leader" : "Block"
-        case .useLeaderAbility:
-            return "Use Leader ability"
+        case .useAbility(let source, _, _):
+            return source == .leader ? "Use Leader ability" : "Use character ability"
         case .endPhase:
             return "End phase"
         case .endTurn:
@@ -175,14 +217,30 @@ enum GameError: Error, Hashable, LocalizedError {
     /// The chosen blocker is rested or not in play.
     case blockerUnavailable
 
-    /// This Leader has no activated ability.
-    case leaderHasNoAbility(String)
+    /// The card that would use the ability has left the board, or was never on
+    /// the activating player's side of it.
+    case abilitySourceNotInPlay
 
-    /// The Leader's ability has already been used this turn.
-    case leaderAbilityAlreadyUsed
+    /// The card does not print an ability box at that position.
+    case noSuchAbility(String)
+
+    /// The ability resolves by itself — a passive rule, or a trigger the engine
+    /// fires — so there is nothing for the player to press.
+    case abilityNotActivated(String)
+
+    /// A "Once Per Turn" ability has already been used by this card this turn.
+    case abilityAlreadyUsed(String)
+
+    /// The cost asks for more of your own Characters than you have that can
+    /// legally pay it.
+    case notEnoughCharactersToTrash(required: Int, available: Int)
+
+    /// The card prints Summon Requirements, so it never reaches the board by
+    /// being summoned normally.
+    case cannotBeSummonedNormally(String)
 
     /// The ability needs a target and none was supplied, or the one supplied
-    /// is on the wrong side of the board.
+    /// is not legal for the ability's scope.
     case abilityNeedsTarget
 
     /// Sentence shown to the player when their tap is refused.
@@ -226,12 +284,21 @@ enum GameError: Error, Hashable, LocalizedError {
             return "Settle the declared attack first."
         case .blockerUnavailable:
             return "That character cannot block right now."
-        case .leaderHasNoAbility(let name):
-            return "\(name) has no ability to activate."
-        case .leaderAbilityAlreadyUsed:
-            return "You have already used your Leader this turn."
+        case .abilitySourceNotInPlay:
+            return "That card is not in play on your side of the board."
+        case .noSuchAbility(let name):
+            return "\(name) does not print that ability."
+        case .abilityNotActivated(let name):
+            return "That \(name) ability resolves on its own — there is nothing to press."
+        case .abilityAlreadyUsed(let name):
+            return "\(name) has already used that ability this turn."
+        case .notEnoughCharactersToTrash(let required, let available):
+            let bodies = required == 1 ? "character" : "characters"
+            return "That costs \(required) of your own \(bodies) and only \(available) can pay it."
+        case .cannotBeSummonedNormally(let name):
+            return "\(name) cannot be summoned normally — it has Summon Requirements."
         case .abilityNeedsTarget:
-            return "Choose a character for that ability."
+            return "Choose a card for that ability."
         }
     }
 

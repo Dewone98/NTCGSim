@@ -3,8 +3,14 @@
 //  NTCGSimulator
 //
 //  The full printing of a single card: the large face, every value on it, what
-//  it actually costs to put into play, the effect and support lines, a Leader's
-//  ability, and the illustration credit.
+//  it actually costs to put into play, every ability box it prints, the support
+//  line, and the illustration credit.
+//
+//  The ability boxes are the point of this screen. A real card prints several of
+//  them, each with its own trigger, its own cost and its own target, and the app
+//  resolves some steps and not others. So every box says which of the two it is.
+//  A player told that a step will not be applied can settle it at the table; a
+//  player who is not told will believe the board.
 //
 
 import SwiftUI
@@ -51,9 +57,8 @@ struct CardDetailView: View {
             statRow(card)
             factRows(card)
             costPanel(card)
-            leaderAbilityPanel(card)
             traitBlock(card)
-            effectPanel(card)
+            abilitySection(card)
             supportPanel(card)
             artistCredit(card)
         }
@@ -202,16 +207,59 @@ struct CardDetailView: View {
         }
     }
 
-    // MARK: Rules text
+    // MARK: Abilities
 
+    /// Every ability box the card prints, in print order.
+    ///
+    /// The card's `effect` string is these same boxes run together with their
+    /// keyword tags, so it is deliberately not printed a second time — that
+    /// would set every rule on this screen twice, once broken down and once not.
+    /// An imported pool may carry the string without the breakdown, and that
+    /// case falls back to printing it whole and saying so.
     @ViewBuilder
-    private func effectPanel(_ card: Card) -> some View {
-        if card.effect.isEmpty {
-            textPanel(heading: "Effect", body: "This card has no effect text.", isMuted: true)
-        } else {
-            textPanel(heading: "Effect", body: card.effect)
+    private func abilitySection(_ card: Card) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+            Text("Abilities").sectionLabel()
+
+            if !card.abilities.isEmpty {
+                ForEach(Array(card.abilities.enumerated()), id: \.offset) { box in
+                    AbilityPanel(ability: box.element)
+                }
+            } else if !card.effect.isEmpty {
+                unbrokenRules(card.effect)
+            } else {
+                Text("This card has no printed ability.")
+                    .font(Typeface.body(14))
+                    .foregroundStyle(Palette.textSecondary)
+            }
         }
     }
+
+    /// An imported card can carry printed rules without the box breakdown the
+    /// bundled pool has. The text is worth showing whole, marked as something
+    /// the app reads and cannot act on rather than quietly dropped.
+    private func unbrokenRules(_ text: String) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+            Text(text)
+                .font(Typeface.body(15))
+                .foregroundStyle(Palette.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("""
+            These rules are not broken into steps the app can resolve, so none \
+            of them are applied. Settle them between yourselves.
+            """)
+                .font(Typeface.body(13))
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Metrics.spacingM)
+        .notchedPanel(fill: Palette.panel, stroke: Palette.warning)
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: Support line
 
     /// The Support line, when the card has one. A card with a Support line can
     /// be summoned as a body for free, or spent as a jutsu for its cost.
@@ -281,8 +329,22 @@ struct CardDetailView: View {
     }
 
     /// Wording for a card that is summoned rather than paid for.
+    ///
+    /// A card printing "Cannot be summoned normally" is not free to summon — it
+    /// cannot be summoned at all, and the engine refuses the play. Saying
+    /// "Summon: free" there would be the one thing this panel exists to avoid.
     private func summonCostDescription(_ card: Card) -> String {
-        var lines = ["Summon: free — putting a body on the board costs no chakra."]
+        var lines: [String] = []
+        if card.cannotBeSummonedNormally {
+            lines.append("""
+            Summon: not available — this card prints "Cannot be summoned \
+            normally", so it can never be played from hand for its cost. It \
+            reaches the board only through the Summon Requirements printed \
+            alongside.
+            """)
+        } else {
+            lines.append("Summon: free — putting a body on the board costs no chakra.")
+        }
         if let jutsu = card.jutsuCost {
             lines.append("As a jutsu: \(chakraPhrase(jutsu)), then it goes to the Trash.")
         }
@@ -300,44 +362,6 @@ struct CardDetailView: View {
     /// "2 chakra", or "no chakra" when the play is free.
     private func chakraPhrase(_ amount: Int) -> String {
         amount == 0 ? "no chakra" : "\(amount) chakra"
-    }
-
-    // MARK: Leader ability
-
-    /// A Leader's activated ability. Unlike other printed effects, this one the
-    /// engine actually resolves, so it is worth calling out separately.
-    @ViewBuilder
-    private func leaderAbilityPanel(_ card: Card) -> some View {
-        if let ability = card.leaderAbility {
-            VStack(alignment: .leading, spacing: Metrics.spacingS) {
-                Text("Leader ability").sectionLabel()
-
-                Text(ability.summary)
-                    .font(Typeface.body(15))
-                    .foregroundStyle(Palette.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text(leaderAbilityFootnote(ability))
-                    .font(Typeface.body(13))
-                    .foregroundStyle(Palette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(Metrics.spacingM)
-            .notchedPanel(fill: Palette.panelActive, stroke: Palette.accent)
-        }
-    }
-
-    private func leaderAbilityFootnote(_ ability: LeaderAbility) -> String {
-        var text = "Activate once per turn during your main phase. It costs no chakra."
-        if ability.needsFriendlyTarget {
-            text += " Choose one of your own characters as the target."
-        } else if ability.needsEnemyTarget {
-            text += " Choose one of your opponent's characters as the target."
-        } else {
-            text += " It needs no target."
-        }
-        return text
     }
 
     private func textPanel(heading: String, body text: String, isMuted: Bool = false) -> some View {
@@ -381,46 +405,259 @@ struct CardDetailView: View {
     }
 }
 
+// MARK: - Ability panel
+
+/// One printed ability box.
+///
+/// The trigger and the once-per-turn tag lead, because between them they decide
+/// when the box may be used at all. The printed text follows exactly as written.
+/// The cost and the target are then stated in plain words, since a scope such as
+/// "every character on the board" reaches both sides of the table and the
+/// printed line rarely says so.
+private struct AbilityPanel: View {
+    let ability: CardAbility
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+            tagRow
+            printedText
+            terms
+
+            if !ability.isFullyImplemented {
+                rule
+                unappliedNote
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Metrics.spacingM)
+        .notchedPanel(fill: fill, stroke: stroke)
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: Tags
+
+    private var tagRow: some View {
+        HStack(spacing: Metrics.spacingXS) {
+            StaticChip(title: triggerTitle, tint: Palette.accent)
+            if ability.oncePerTurn {
+                StaticChip(title: "Once per turn")
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// `.passive` prints no keyword tag on the card at all, so the panel names
+    /// the box for what the model says it is rather than showing an empty chip.
+    private var triggerTitle: String {
+        ability.trigger.title.isEmpty ? "Standing rule" : ability.trigger.title
+    }
+
+    // MARK: Printed text
+
+    private var printedText: some View {
+        Text(ability.text)
+            .font(Typeface.body(15))
+            .foregroundStyle(Palette.textPrimary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    // MARK: Terms
+
+    /// What the box charges and what it reaches. A free box with no target
+    /// prints neither line rather than two ways of saying "nothing".
+    @ViewBuilder
+    private var terms: some View {
+        if !ability.cost.isFree || targetDescription != nil {
+            VStack(alignment: .leading, spacing: Metrics.spacingXS) {
+                if !ability.cost.isFree {
+                    term("Cost", ability.cost.summary)
+                }
+                if let target = targetDescription {
+                    term("Targets", target)
+                }
+            }
+        }
+    }
+
+    private func term(_ label: String, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Metrics.spacingS) {
+            Text(label)
+                .font(Typeface.label(10))
+                .tracking(1.2)
+                .textCase(.uppercase)
+                .foregroundStyle(Palette.textSecondary)
+                .frame(minWidth: 52, alignment: .leading)
+
+            Text(text)
+                .font(Typeface.body(13))
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// What the scope acts on, in words.
+    ///
+    /// The scopes that ask the player to pick already carry the question they
+    /// ask, so those print their own prompt. The scopes that resolve themselves
+    /// carry no wording, and are described here by what the resolver actually
+    /// reaches — `.allCharacters` in particular means the whole board, not your
+    /// half of it.
+    private var targetDescription: String? {
+        switch ability.target {
+        case .none:
+            return nil
+        case .selfCard:
+            return "This card"
+        case .ownTeam:
+            return "Your own characters"
+        case .allCharacters:
+            return "Every character on the board, both sides"
+        case .anyCharacter, .friendlyCharacter, .opposingCharacter,
+             .restedCharacter, .leaderOrCharacter:
+            return ability.target.prompt
+        }
+    }
+
+    // MARK: Unapplied steps
+
+    /// A hairline, so the app's own note about itself is never mistaken for
+    /// something printed on the card.
+    private var rule: some View {
+        Rectangle()
+            .fill(Palette.border)
+            .frame(height: 1)
+            .padding(.vertical, Metrics.spacingXS)
+    }
+
+    /// Marked plainly rather than politely. The card is shown in full either
+    /// way; what changes is whether the player knows the board will not do it.
+    private var unappliedNote: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingXS) {
+            HStack(spacing: Metrics.spacingXS) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .bold))
+                Text("Shown, not applied in full")
+                    .font(Typeface.label(11))
+                    .tracking(1.2)
+                    .textCase(.uppercase)
+            }
+            .foregroundStyle(Palette.warning)
+
+            Text(unappliedExplanation)
+                .font(Typeface.body(13))
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(Array(unappliedSteps.enumerated()), id: \.offset) { step in
+                Text("— \(step.element)")
+                    .font(Typeface.body(13))
+                    .foregroundStyle(Palette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// The printed steps the engine displays and does not resolve, in the words
+    /// the card data carries them in.
+    private var unappliedSteps: [String] {
+        ability.effects.compactMap { effect in
+            guard case .unimplemented(let text) = effect else { return nil }
+            return text
+        }
+    }
+
+    private var unappliedExplanation: String {
+        if ability.effects.isEmpty {
+            return """
+            The app carries this box as printed but has no steps for it, so \
+            none of it is applied. Settle it between yourselves.
+            """
+        }
+        if unappliedSteps.count == ability.effects.count {
+            return """
+            The app displays this rule and applies none of it. Settle it \
+            between yourselves.
+            """
+        }
+        let isSingle = unappliedSteps.count == 1
+        return """
+        The app applies the rest of this box, but not the \
+        step\(isSingle ? "" : "s") below. Settle \(isSingle ? "it" : "them") \
+        between yourselves.
+        """
+    }
+
+    // MARK: Trim
+
+    private var fill: Color {
+        ability.isActivated ? Palette.panelActive : Palette.panel
+    }
+
+    /// Outlined in the warning colour whenever a step is not applied, so the
+    /// panel is marked before a word of it has been read. Otherwise the accent
+    /// marks the boxes the player can actually press a button for.
+    private var stroke: Color {
+        if !ability.isFullyImplemented { return Palette.warning }
+        return ability.isActivated ? Palette.accent : Palette.border
+    }
+}
+
 // MARK: - Static chip
 
 /// A chip that only reports — the read-only twin of `FilterChip`, used for
-/// trait lines that must not look tappable.
+/// trait lines and ability tags, which must not look tappable.
 private struct StaticChip: View {
     let title: String
+
+    /// Colours the lettering and the outline. The default is the quiet
+    /// treatment a trait gets; an ability's trigger takes the accent so that it
+    /// leads its panel.
+    var tint: Color? = nil
 
     var body: some View {
         Text(title)
             .font(Typeface.label(11))
             .tracking(1.2)
             .textCase(.uppercase)
-            .foregroundStyle(Palette.textSecondary)
+            .foregroundStyle(tint ?? Palette.textSecondary)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .notchedPanel(notch: 6, corners: .diagonal)
+            .notchedPanel(notch: 6, corners: .diagonal,
+                          fill: Palette.panel, stroke: tint ?? Palette.border)
     }
 }
 
 // MARK: - Previews
 
-#Preview("Character with support") {
-    NavigationStack {
-        CardDetailView(cardID: "N-030")
-    }
-    .environment(CardDatabase())
-    .environment(Router())
-}
-
-#Preview("Support card") {
-    NavigationStack {
-        CardDetailView(cardID: "SP-R01")
-    }
-    .environment(CardDatabase())
-    .environment(Router())
-}
-
-#Preview("Leader with an ability") {
+#Preview("Leader, two ability boxes") {
     NavigationStack {
         CardDetailView(cardID: "N-001")
+    }
+    .environment(CardDatabase())
+    .environment(Router())
+}
+
+#Preview("Every box a card can print") {
+    NavigationStack {
+        CardDetailView(cardID: "N-014")
+    }
+    .environment(CardDatabase())
+    .environment(Router())
+}
+
+#Preview("Character with a Support line") {
+    NavigationStack {
+        CardDetailView(cardID: "K-039")
+    }
+    .environment(CardDatabase())
+    .environment(Router())
+}
+
+#Preview("No printed ability") {
+    NavigationStack {
+        CardDetailView(cardID: "SMP-05")
     }
     .environment(CardDatabase())
     .environment(Router())

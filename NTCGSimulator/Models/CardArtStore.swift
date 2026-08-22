@@ -58,6 +58,10 @@ final class CardArtStore {
     /// Extensions we will attempt to load.
     private static let supportedExtensions: Set<String> = [
         "png", "jpg", "jpeg", "heic", "heif", "webp", "tiff", "gif",
+        // AVIF decodes through ImageIO from iOS 16, and is what Photos hands
+        // back when exporting on a recent iPhone — so it must be accepted or a
+        // whole export silently matches nothing.
+        "avif", "avifs",
     ]
 
     /// Decode sizes a request is rounded up to, largest last. Bucketing stops
