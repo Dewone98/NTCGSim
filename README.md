@@ -4,8 +4,9 @@ A native iOS trading-card-game simulator, built in SwiftUI. Offline-first: build
 browse the card pool, and play full games against an AI opponent or both sides yourself.
 
 > **Unofficial.** This is a fan project and is not affiliated with, endorsed by, or
-> connected to any card game publisher. The card pool that ships with the app is demo
-> data written for this project — see [CARD_DATA.md](CARD_DATA.md) to import your own.
+> connected to any card game publisher. **No card artwork is distributed here** — the
+> app draws generated art until you install your own images on your own device. See
+> [CARD_DATA.md](CARD_DATA.md).
 
 ---
 
@@ -52,7 +53,7 @@ NTCGSimulator/
 │  ├─ Settings/      Preferences and card-data import
 │  └─ Placeholder/   "Coming soon" screens
 ├─ Persistence/      SettingsStore, DeckStore
-└─ Resources/        cards.json (demo pool)
+└─ Resources/        cards.json (card values — no artwork)
 ```
 
 ### Where to change things
@@ -118,3 +119,16 @@ modelled as `LeaderAbility` and resolved by the engine.
 This game's official rulebook is not public. The engine implements a coherent ruleset
 based on what has been shown publicly, and it is deliberately isolated in `Engine/` so
 corrections land in one place rather than being spread through the UI.
+
+---
+
+## Licence
+
+The **code** in this repository is MIT licensed — see [LICENSE](LICENSE).
+
+That licence covers the code and nothing else. It does not, and cannot, grant any
+rights over the card game itself: names, artwork, and the wording printed on cards
+belong to their publisher. `cards.json` holds the values the engine needs to play —
+stats, traits and rules text — and carries no artwork.
+
+If you fork this, the same line applies to you: ship the code, leave the art alone.
