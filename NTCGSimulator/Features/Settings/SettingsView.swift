@@ -34,15 +34,7 @@ struct SettingsView: View {
     /// `CardDatabase.lastImportError`.
     @State private var pickerError: String?
 
-    /// Artwork import: the picker, and the outcome of the last run.
-    @State private var isImportingArt = false
-    @State private var artSummary: ArtImportSummary?
-    @State private var artError: String?
 
-    /// Bulk download from the configured image source.
-    @State private var artProgress = ArtFetchProgress()
-    @State private var fetchTask: Task<Void, Never>?
-    @State private var templateError: String?
 
     var body: some View {
         @Bindable var settings = settings
@@ -64,7 +56,6 @@ struct SettingsView: View {
                     chatSoundRow(isOn: $settings.chatSoundEnabled)
                     usernameRow
                     cardDataRow
-                    artworkRow
                 }
                 .padding(.bottom, Metrics.spacingXL)
             }
@@ -78,14 +69,6 @@ struct SettingsView: View {
         ) { result in
             handleImport(result)
         }
-        .fileImporter(
-            isPresented: $isImportingArt,
-            allowedContentTypes: [.image, .folder],
-            allowsMultipleSelection: true
-        ) { result in
-            handleArtImport(result)
-        }
-        .onDisappear { fetchTask?.cancel() }
         .confirmationDialog(
             "Reset to the bundled set?",
             isPresented: $isConfirmingReset,
@@ -289,7 +272,6 @@ struct SettingsView: View {
                     isConfirmingReset = true
                 }
 
-                artFolderPath
             }
         }
     }
@@ -330,198 +312,7 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Selectable so the path can be copied out and pasted into the Files app.
-    private var artFolderPath: some View {
-        VStack(alignment: .leading, spacing: Metrics.spacingXS) {
-            Text("Illustrations folder").sectionLabel()
-
-            Text(artDirectoryDescription)
-                .font(Typeface.body(12))
-                .foregroundStyle(Palette.textSecondary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var artDirectoryDescription: String {
-        CardDatabase.artDirectoryURL?.path(percentEncoded: false)
-            ?? "This device has no storage folder available."
-    }
-
     // MARK: Artwork
-
-    /// Illustrations are never shipped with the app, so this is where a player
-    /// brings their own — either by importing files or by pointing the app at
-    /// an image source they have the right to use.
-    private var artworkRow: some View {
-        @Bindable var settings = settings
-
-        return SettingRow(
-            title: "Card artwork",
-            explanation: "No artwork ships with the app; cards are drawn from generated art until you add your own. Images stay on this device and are matched to cards by filename, so N-004.png lands on card N-004."
-        ) {
-            VStack(alignment: .leading, spacing: Metrics.spacingM) {
-                artworkStatus
-                artworkMessages
-
-                WideButton(title: "Import images or a folder", style: .primary) {
-                    isImportingArt = true
-                }
-
-                imageSourceField(template: $settings.remoteArtTemplate)
-                fetchControls
-
-                if database.artStore.installedCount > 0 {
-                    WideButton(title: "Remove all artwork", style: .destructive) {
-                        database.artStore.removeAllArt()
-                        artSummary = nil
-                        artError = nil
-                    }
-                }
-            }
-        }
-    }
-
-    private var artworkStatus: some View {
-        HStack(spacing: Metrics.spacingS) {
-            CountPill(label: "Installed", value: "\(database.artStore.installedCount)")
-            CountPill(
-                label: "Cards covered",
-                value: "\(database.cardsWithArtworkCount) / \(database.cards.count)"
-            )
-            Spacer(minLength: 0)
-        }
-    }
-
-    @ViewBuilder
-    private var artworkMessages: some View {
-        if let artError {
-            statusLine(artError, tint: Palette.negative, symbol: "exclamationmark.triangle.fill")
-        } else if let artSummary {
-            statusLine(
-                artSummary.message,
-                tint: artSummary.installed.isEmpty ? Palette.warning : Palette.positive,
-                symbol: artSummary.installed.isEmpty ? "questionmark.circle.fill" : "checkmark.circle.fill"
-            )
-            // Naming the first few misses makes a mis-named batch obvious
-            // rather than leaving the player to guess what went wrong.
-            if !artSummary.unmatched.isEmpty {
-                Text("Not matched: " + artSummary.unmatched.prefix(4).joined(separator: ", ")
-                     + (artSummary.unmatched.count > 4 ? "…" : ""))
-                    .font(Typeface.body(12))
-                    .foregroundStyle(Palette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    /// The address the app downloads from. Left empty by design — the app has
-    /// no default source, so the choice of where art comes from is the
-    /// player's alone.
-    private func imageSourceField(template: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: Metrics.spacingXS) {
-            Text("Image source").sectionLabel()
-
-            TextField("https://example.com/cards/{id}.png", text: template)
-                .textFieldStyle(.plain)
-                .font(Typeface.body(13))
-                .foregroundStyle(Palette.textPrimary)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .keyboardType(.URL)
-                .padding(Metrics.spacingS)
-                .notchedPanel(notch: 6, corners: .diagonal, fill: Palette.panelActive)
-                .onChange(of: template.wrappedValue) { _, _ in templateError = nil }
-
-            Text("Use \(RemoteArtFetcher.idPlaceholder) where the card number goes. Downloads are saved to this device only.")
-                .font(Typeface.body(11))
-                .foregroundStyle(Palette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let templateError {
-                statusLine(templateError, tint: Palette.negative, symbol: "exclamationmark.triangle.fill")
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private var fetchControls: some View {
-        if artProgress.isRunning {
-            VStack(alignment: .leading, spacing: Metrics.spacingS) {
-                ProgressView(value: artProgress.fraction)
-                    .tint(Palette.accent)
-
-                Text(artProgress.summary)
-                    .font(Typeface.body(12))
-                    .foregroundStyle(Palette.textSecondary)
-
-                WideButton(title: "Stop", style: .secondary) {
-                    artProgress.isCancelled = true
-                }
-            }
-        } else {
-            VStack(alignment: .leading, spacing: Metrics.spacingS) {
-                WideButton(
-                    title: "Download missing artwork",
-                    style: .secondary,
-                    isEnabled: !settings.remoteArtTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ) {
-                    startFetch()
-                }
-
-                if artProgress.total > 0 {
-                    Text(artProgress.summary)
-                        .font(Typeface.body(12))
-                        .foregroundStyle(Palette.textSecondary)
-                }
-            }
-        }
-    }
-
-    /// Validates the template before committing to a long run, so a typo fails
-    /// immediately rather than after dozens of failed requests.
-    private func startFetch() {
-        templateError = nil
-
-        if case .failure(let error) = RemoteArtFetcher.validate(template: settings.remoteArtTemplate) {
-            templateError = error.errorDescription
-            return
-        }
-
-        let cards = database.cards
-        let template = settings.remoteArtTemplate
-        let store = database.artStore
-
-        fetchTask?.cancel()
-        fetchTask = Task { @MainActor in
-            await RemoteArtFetcher.fetchAll(
-                cards: cards,
-                template: template,
-                into: store,
-                progress: artProgress
-            )
-        }
-    }
-
-    /// Copies picked images in and reports what matched.
-    private func handleArtImport(_ result: Result<[URL], Error>) {
-        artError = nil
-        artSummary = nil
-
-        switch result {
-        case .success(let urls):
-            guard !urls.isEmpty else {
-                artError = "No files were chosen."
-                return
-            }
-            artSummary = database.importArtwork(from: urls)
-
-        case .failure(let error):
-            artError = error.localizedDescription
-        }
-    }
 
     // MARK: Card data import
 

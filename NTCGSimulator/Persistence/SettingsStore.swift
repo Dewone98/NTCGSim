@@ -65,10 +65,6 @@ final class SettingsStore {
     var chatSoundEnabled: Bool = false                { didSet { save() } }
     var username: String = "Player"                   { didSet { save() } }
 
-    /// Address template for downloading card art, with `{id}` standing in for
-    /// the collector number. Empty by default — the app ships with no image
-    /// source, and the player points it at one they have the right to use.
-    var remoteArtTemplate: String = ""                { didSet { save() } }
 
     // MARK: Persistence
 
@@ -85,7 +81,6 @@ final class SettingsStore {
         var soundEnabled: Bool
         var chatSoundEnabled: Bool
         var username: String
-        var remoteArtTemplate: String?
     }
 
     /// Suppresses writes while `load()` is populating the properties.
@@ -113,7 +108,6 @@ final class SettingsStore {
         soundEnabled       = snapshot.soundEnabled
         chatSoundEnabled   = snapshot.chatSoundEnabled
         username           = snapshot.username
-        remoteArtTemplate  = snapshot.remoteArtTemplate ?? ""
     }
 
     private func save() {
@@ -128,7 +122,6 @@ final class SettingsStore {
             soundEnabled: soundEnabled,
             chatSoundEnabled: chatSoundEnabled,
             username: username,
-            remoteArtTemplate: remoteArtTemplate
         )
         if let data = try? JSONEncoder().encode(snapshot) {
             UserDefaults.standard.set(data, forKey: Self.key)

@@ -177,8 +177,6 @@ final class CardDatabase {
     }
 
     /// Where illustrations live. Shown in Settings so the player knows where
-    /// to put files.
-    static var artDirectoryURL: URL? { CardArtStore.directoryURL }
 
     /// Validates and installs a replacement card pool.
     /// - Returns: the number of cards installed, or `nil` on failure.
@@ -230,19 +228,18 @@ final class CardDatabase {
     /// Both paths go through the art store, so the named-file case is
     /// downsampled and cached exactly like art installed by id — otherwise
     /// every draw of that card would decode the file again from scratch.
+    /// The illustration for a card. Artwork ships in the app bundle, so this
+    /// is the same picture on every install.
     func artwork(for card: Card) -> UIImage? {
-        if let installed = artStore.image(forCardID: card.id) {
-            return installed
-        }
-        guard let filename = card.artFilename else { return nil }
-        return artStore.image(named: filename)
+        artStore.image(forCardID: card.id)
     }
 
-    /// Installs illustrations from files or folders, matched to cards by name.
-    @discardableResult
-    func importArtwork(from urls: [URL]) -> ArtImportSummary {
-        artStore.importArt(from: urls, database: self)
+    /// A size-appropriate illustration for a card, for grids and board slots
+    /// that draw far smaller than the art is printed.
+    func artwork(for card: Card, maxPixelSize: Int) -> UIImage? {
+        artStore.image(forCardID: card.id, maxPixelSize: maxPixelSize)
     }
+
 
     /// How many cards in the current pool have an illustration installed.
     var cardsWithArtworkCount: Int {

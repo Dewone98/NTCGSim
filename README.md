@@ -4,9 +4,12 @@ A native iOS trading-card-game simulator, built in SwiftUI. Offline-first: build
 browse the card pool, and play full games against an AI opponent or both sides yourself.
 
 > **Unofficial.** This is a fan project and is not affiliated with, endorsed by, or
-> connected to any card game publisher. **No card artwork is distributed here** — the
-> app draws generated art until you install your own images on your own device. See
-> [CARD_DATA.md](CARD_DATA.md).
+> connected to any card game publisher.
+>
+> **This repository contains card artwork owned by the game's publisher**, bundled so
+> every install looks identical. That is why it is private. Publishing it, or
+> distributing the app, would be redistributing that artwork — see
+> [CARD_DATA.md](CARD_DATA.md) before doing either.
 
 ---
 
@@ -26,6 +29,8 @@ sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 ./build.sh run      # build, install and launch on the booted simulator
 ./build.sh test     # run the unit tests
 ```
+
+Artwork is bundled, so there is nothing to install on the device separately.
 
 **Target:** iOS 18.0 · iPhone and iPad · SwiftUI · Swift 5 language mode.
 
@@ -53,7 +58,7 @@ NTCGSimulator/
 │  ├─ Settings/      Preferences and card-data import
 │  └─ Placeholder/   "Coming soon" screens
 ├─ Persistence/      SettingsStore, DeckStore
-└─ Resources/        cards.json (card values — no artwork)
+└─ Resources/        cards.json (card values) + CardArt/ (bundled artwork)
 ```
 
 ### Where to change things
@@ -140,9 +145,14 @@ corrections land in one place rather than being spread through the UI.
 
 The **code** in this repository is MIT licensed — see [LICENSE](LICENSE).
 
-That licence covers the code and nothing else. It does not, and cannot, grant any
-rights over the card game itself: names, artwork, and the wording printed on cards
-belong to their publisher. `cards.json` holds the values the engine needs to play —
-stats, traits and rules text — and carries no artwork.
+That licence covers **the code and nothing else**, and it is not ours to extend any
+further. Names, artwork and the wording printed on cards belong to the game's
+publisher. Two things in this repository are theirs, not the licence's to give away:
 
-If you fork this, the same line applies to you: ship the code, leave the art alone.
+- `NTCGSimulator/Resources/CardArt/` — the bundled card artwork.
+- The rules text inside `cards.json`, transcribed from the cards so the engine can
+  resolve them.
+
+The repository is private for that reason. Before making it public or distributing the
+app, both need replacing with material there is a right to use — and removing them from
+the git history, not merely from the working tree.
