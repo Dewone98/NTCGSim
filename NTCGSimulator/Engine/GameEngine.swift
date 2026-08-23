@@ -81,6 +81,28 @@ final class GameEngine {
         }
     }
 
+    /// An engine over an existing board, built for the AI's search. The state
+    /// arrives by value — `GameState` is a pure value graph, so mutating this
+    /// engine can never touch the game it was copied from — and the journal
+    /// is muted, because a search replays thousands of actions nobody will
+    /// ever read about. Auto-pass stays off: the search weighs every pass
+    /// itself.
+    init(
+        searchState: GameState,
+        configuration: GameConfiguration,
+        database: CardDatabase,
+        seed: UInt64
+    ) {
+        self.configuration = configuration
+        self.database = database
+        self.seed = seed
+        self.autoPass = .holdWindow
+        var muted = Journal(limit: 1)
+        muted.isMuted = true
+        self.journal = muted
+        self.state = searchState
+    }
+
     // MARK: Derived state
 
     var outcome: GameOutcome { state.outcome }

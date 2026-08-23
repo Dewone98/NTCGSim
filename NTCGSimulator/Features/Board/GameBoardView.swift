@@ -16,6 +16,15 @@
 //  the engine would accept into it — a "Support Activated" card never lights up
 //  for a bare summon, because the chain it answers is empty.
 //
+//  Everything the board shows *about* a move is presentation and nothing else,
+//  and every piece of it is worked out after the fact by comparing the position
+//  either side of `apply`: the floating damage numbers, the full-screen jutsu
+//  effect, the shot that crosses the mat when an attack is declared, and the
+//  beat an activated Support is held in its slot before the row lets it go.
+//  None of it delays a rule, none of it takes a touch, and each piece carries a
+//  backstop that clears it — so a player who taps straight through the pictures
+//  plays exactly the same game as one who watches all of them.
+//
 
 import SwiftUI
 
@@ -191,10 +200,23 @@ struct BoardCardFace: View {
     var isDimmed: Bool = false
     var highlight: Color? = nil
 
+    /// How a card lying face down is drawn, when it is lying face down at all.
+    ///
+    /// Passed straight through rather than decided here, because the choice is
+    /// an information rule and only the caller knows whose card this is: a
+    /// player's own set Support may be shown blurred, an opponent's may not.
+    var faceDown: FaceDownStyle? = nil
+
     var body: some View {
         let design = designWidth
 
-        CardFaceView(card: card, size: size, isDimmed: isDimmed, highlight: highlight)
+        CardFaceView(
+            card: card,
+            size: size,
+            isDimmed: isDimmed,
+            highlight: highlight,
+            faceDown: faceDown
+        )
             .frame(width: design, height: design / Metrics.cardAspect)
             .scaleEffect(width / design, anchor: .center)
             .frame(width: width, height: width / Metrics.cardAspect)
@@ -287,6 +309,7 @@ private struct BoardStage: View {
     @Environment(CardDatabase.self) private var database
     @Environment(SettingsStore.self) private var settings
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The card in the reader.
     @State private var focusedCard: Card?
@@ -309,8 +332,35 @@ private struct BoardStage: View {
     /// ACTIVATE …, each either offered or refused with the engine's reason.
     @State private var handPanel: HandCard?
 
-    /// A decision held back until the player confirms it.
+    /// A decision held back until the player confirms it. Answered on the
+    /// board, never in a system dialog — see `BoardConfirmPanel`.
     @State private var confirmation: BoardConfirmation?
+
+    /// The card the full-screen viewer is showing.
+    @State private var zoomedCard: ZoomedCard?
+
+    /// Hits the mat still owes a floating number for. Each removes itself when
+    /// its animation reports finished.
+    @State private var damageFlashes: [DamageFlash] = []
+
+    /// Jutsu resolutions still owed an effect, oldest first.
+    @State private var jutsuQueue: [JutsuPlay] = []
+
+    /// The effect currently on screen, if any.
+    @State private var jutsuPlaying: JutsuPlay?
+
+    /// Supports the mat is still turning face-up, or still holding on screen
+    /// after the engine emptied their slot. Each removes itself when its hold
+    /// reports finished, exactly as a damage number does.
+    @State private var supportReveals: [SupportReveal] = []
+
+    /// The declared attack the mat is still drawing, if any.
+    @State private var attackShot: AttackShot?
+
+    /// Where every card that publishes an endpoint currently sits, in the
+    /// overlay's own space. Kept so a shot can be aimed at a card the attack
+    /// is about to take off the board — see `AttackShot`.
+    @State private var cardCentres = CardCentres()
 
     /// The most recent refusal, shown briefly rather than as an alert.
     @State private var banner: BoardBanner?
@@ -323,6 +373,11 @@ private struct BoardStage: View {
 
     /// Long enough to watch a move land, short enough not to feel like a stall.
     private static let aiDelay: Duration = .seconds(0.7)
+
+    /// Effects allowed to back up behind the one playing. A chain resolving
+    /// four links deep would otherwise leave the board flaring long after the
+    /// position that produced it has gone, so the oldest are dropped.
+    private static let jutsuQueueLimit = 2
 
     var body: some View {
         GeometryReader { geo in
@@ -343,10 +398,20 @@ private struct BoardStage: View {
             .frame(width: canvas.width, height: canvas.height)
             .scaleEffect(layout.contentScale)
             .frame(width: geo.size.width, height: geo.size.height)
+            // Outside the zoom, so the endpoints the cards published resolve
+            // in screen points and a shot drawn here lands on the card it was
+            // aimed at even on a board that had to scale itself down.
+            .overlayPreferenceValue(ProjectileAnchorKey.self) { anchors in
+                GeometryReader { proxy in
+                    projectileLayer(anchors, in: proxy)
+                }
+            }
         }
+        .overlay { jutsuOverlay }
         .overlay(alignment: .top) { bannerView }
-        .overlay(alignment: .bottom) { responsePanel }
+        .overlay(alignment: .bottom) { bottomPanel }
         .overlay { resultOverlay }
+        .overlay { zoomOverlay }
         .sheet(item: $handPanel) { handCard in
             HandActionPanel(
                 handCard: handCard,
@@ -386,18 +451,10 @@ private struct BoardStage: View {
         .sheet(isPresented: $showsJournal) {
             JournalSheet(journal: engine.journal) { showsJournal = false }
         }
-        .confirmationDialog(
-            confirmationTitle,
-            isPresented: confirmationBinding,
-            titleVisibility: .visible,
-            presenting: confirmation
-        ) { pending in
-            confirmationActions(pending)
-        } message: { pending in
-            Text(message(for: pending))
-        }
         .task(id: revision) { await advanceAutomation() }
         .task(id: banner?.id) { await fadeBanner() }
+        .task(id: attackShot?.id) { await sweepAttackShot() }
+        .task(id: jutsuPlaying?.id) { await sweepJutsu() }
         // The engine is Foundation-only and holds its own copy of the one
         // setting the rules care about, so the board keeps the two in step.
         .task(id: settings.autoPass) { engine.autoPass = settings.autoPass }
@@ -462,12 +519,28 @@ private struct BoardStage: View {
             engine: engine,
             emphasis: emphasis(for: slot),
             chakraFace: chakraFace,
-            onRead: { focusedCard = $0 },
+            onRead: { read($0) },
             onSelectCharacter: { tapCharacter($0, on: slot) },
             onSelectLeader: { tapLeader(of: slot) },
-            onSelectSupport: { tapSupport(at: $0, on: slot) }
+            onSelectSupport: { tapSupport(at: $0, on: slot) },
+            flashes: damageFlashes,
+            onFlashFinished: { id in damageFlashes.removeAll { $0.id == id } },
+            reveals: supportReveals.filter { $0.slot == slot },
+            onRevealFinished: { id in supportReveals.removeAll { $0.id == id } }
         )
         .frame(height: layout.sideHeight)
+    }
+
+    /// Reading a card: into the reader, and up to full size.
+    ///
+    /// The mat's read gesture is a long press, and "read this card in full" is
+    /// exactly what the viewer is for — so one gesture does both rather than
+    /// the board growing a second, quieter affordance nobody would find. The
+    /// board can only ever be handed a card the side view was willing to
+    /// reveal, which is what keeps an opposing face-down Support out of here.
+    private func read(_ card: Card) {
+        focusedCard = card
+        zoomedCard = ZoomedCard(card)
     }
 
     private func statusBar(_ layout: BoardLayout) -> some View {
@@ -480,8 +553,22 @@ private struct BoardStage: View {
             hasSummoned: engine.hasSummonedThisTurn(engine.currentPlayer),
             journalCount: engine.journal.count,
             onShowJournal: layout.isCompact ? { showsJournal = true } : nil,
-            onCancelTargeting: cancelTargetingAction
+            onCancelTargeting: cancelTargetingAction,
+            targetingNote: targetingNote
         )
+    }
+
+    /// The short instruction the band carries while the mat is lit for a
+    /// target. It names what is being chosen; the prompt beside it is the
+    /// card's own wording, which never says that the answer is a tap.
+    private var targetingNote: String? {
+        if let choice = engine.pendingChoice, isHumanControlled(choice.player) {
+            guard isBoardPicked(choice) else { return nil }
+            guard choice.maxSelections == 1 else { return "Choose up to \(choice.maxSelections)" }
+            return handChoice == nil ? "Choose a target" : "Choose a card"
+        }
+        if armedAttacker != nil { return "Attack target" }
+        return nil
     }
 
     /// Whether the hand is the thing the board is waiting on.
@@ -500,6 +587,10 @@ private struct BoardStage: View {
 
     /// The hand dims whole while something else owns the next tap — an armed
     /// attacker, or a prompt waiting on an answer.
+    ///
+    /// The exception is a prompt whose options ARE cards in hand: then the
+    /// strip is the mat, and it lights the offered positions exactly as the
+    /// board lights an offered body.
     private func hand(_ layout: BoardLayout) -> some View {
         HandView(
             cards: engine.handCards(for: nearSlot),
@@ -507,10 +598,12 @@ private struct BoardStage: View {
             selectedIndex: selectedHandIndex,
             isInteractive: handIsLive,
             emptyMessage: "\(displayName(for: nearSlot)) has no cards in hand.",
+            choiceTargets: handChoiceTargets,
+            stagedTargets: stagedHandIndices,
             onPlay: { tapHandCard($0) },
             onRead: { handCard in
-                focusedCard = handCard.card
                 selectedHandIndex = handCard.id
+                read(handCard.card)
             }
         )
         .frame(height: layout.handHeight)
@@ -522,7 +615,7 @@ private struct BoardStage: View {
             isCompact: layout.isCompact,
             actions: contextActions,
             soundEnabled: soundBinding,
-            onLeave: { confirmation = .leave }
+            onLeave: { ask(.leave) }
         )
     }
 
@@ -646,6 +739,27 @@ private struct BoardStage: View {
             return value
         }
 
+        // An armed attacker owns the whole mat, both halves: the only cards
+        // still lit are the one chosen to swing with and the ones it may
+        // legally be pointed at, taken from `canAttack` rather than restated.
+        if let armed = armedAttacker {
+            value.isTargetingAttack = true
+            guard slot != acting else {
+                switch armed {
+                case .character(let id): value.selectedAttackerID = id
+                case .leader:            value.leaderIsSelectedAttacker = true
+                }
+                return value
+            }
+            value.attackTargets = Set(
+                engine.side(slot).characters
+                    .filter { engine.canAttack(attacker: armed, target: .character($0.id), by: acting) }
+                    .map(\.id)
+            )
+            value.leaderIsAttackTarget = engine.canAttack(attacker: armed, target: .leader, by: acting)
+            return value
+        }
+
         if slot == acting {
             value.answerableSupports = activatableSupportSlots(for: slot)
             value.attackers = Set(
@@ -662,26 +776,11 @@ private struct BoardStage: View {
                 || engine.recoveryBlock(for: slot) == nil
             value.leaderNote = leaderNote(mayAttack: value.leaderMayAttack,
                                           abilityReady: value.leaderAbilityReady)
-
-            switch armedAttacker {
-            case .character(let id): value.selectedAttackerID = id
-            case .leader:            value.leaderIsSelectedAttacker = true
-            case nil:                break
-            }
             return value
         }
 
-        // The far side is only ever a set of targets, and only once an attacker
-        // is armed. Standing characters are not among them.
-        if let armed = armedAttacker {
-            value.isTargetingAttack = true
-            value.attackTargets = Set(
-                engine.side(slot).characters
-                    .filter { engine.canAttack(attacker: armed, target: .character($0.id), by: acting) }
-                    .map(\.id)
-            )
-            value.leaderIsAttackTarget = engine.canAttack(attacker: armed, target: .leader, by: acting)
-        }
+        // With nothing armed and nothing being chosen, the far side is not
+        // being asked for anything at all.
         return value
     }
 
@@ -768,7 +867,7 @@ private struct BoardStage: View {
                 onPass: { perform(.passCounter, by: window.respondingSlot) }
             )
             .padding(Metrics.spacingS)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .transition(panelTransition)
         }
     }
 
@@ -850,6 +949,13 @@ private struct BoardStage: View {
     private func tapHandCard(_ handCard: HandCard) {
         focusedCard = handCard.card
         selectedHandIndex = handCard.id
+
+        // A prompt picking from the hand is answered by tapping the card, the
+        // same way a prompt picking from the mat is.
+        if handChoice != nil {
+            chooseFromBoard(.handCard(index: handCard.id))
+            return
+        }
 
         if engine.pendingChoice != nil {
             show("Answer the open prompt first.")
@@ -984,12 +1090,29 @@ private struct BoardStage: View {
         offerSheet = .leader
     }
 
+    /// Aims the armed attacker.
+    ///
+    /// With `targetConfirm` set to ask, the attacker and its target both stay
+    /// lit on the mat while the panel asks — which is the whole reason the
+    /// question is a panel rather than an alert.
     private func requestAttack(attacker: AttackerReference, target: AttackTarget, targetName: String) {
         guard settings.targetConfirm == .askMe else {
             perform(.declareAttack(attacker: attacker, target: target), by: engine.currentPlayer)
             return
         }
-        confirmation = .attack(attacker: attacker, target: target, targetName: targetName)
+        ask(.attack(attacker: attacker, target: target, targetName: targetName))
+    }
+
+    /// Opens the in-board confirmation panel.
+    private func ask(_ pending: BoardConfirmation) {
+        withAnimation(.easeOut(duration: 0.2)) { confirmation = pending }
+    }
+
+    /// Closes it without acting. The armed attacker is deliberately left where
+    /// it is, so backing out of a target lands the player back in targeting
+    /// rather than at the start of the decision.
+    private func dismissConfirmation() {
+        withAnimation(.easeOut(duration: 0.2)) { confirmation = nil }
     }
 
     /// Backs out of the armed attacker.
@@ -1013,8 +1136,9 @@ private struct BoardStage: View {
         return isBoardPicked(choice) ? choice : nil
     }
 
-    /// The open prompt, when it is this player's and picked from a hidden zone —
-    /// hand, deck or trash — which the mat cannot show.
+    /// The open prompt, when it is this player's and picked from a zone the
+    /// board cannot draw — the deck or the trash. The hand is not one of
+    /// those: it is on screen, so it is picked from on screen.
     private var listChoice: PendingChoice? {
         guard let choice = engine.pendingChoice, isHumanControlled(choice.player) else { return nil }
         return isBoardPicked(choice) ? nil : choice
@@ -1026,14 +1150,46 @@ private struct BoardStage: View {
         Binding(get: { listChoice }, set: { _ in })
     }
 
-    /// A prompt every option of which points at a card in play.
+    /// A prompt every option of which points at something the player can see
+    /// and touch: a card in play, or a card in their own hand.
+    ///
+    /// Deck and trash picks are the only ones the mat genuinely cannot show —
+    /// there is nowhere on the board those cards are drawn — so they are the
+    /// only ones that fall through to a list.
     private func isBoardPicked(_ choice: PendingChoice) -> Bool {
         choice.options.allSatisfy { option in
             switch option.target {
-            case .character, .leader:            return true
-            case .handCard, .trashCard, .deckCard: return false
+            case .character, .leader, .handCard: return true
+            case .trashCard, .deckCard:          return false
             }
         }
+    }
+
+    /// The open prompt, when its options are cards in the near player's hand.
+    private var handChoice: PendingChoice? {
+        guard let choice = boardChoice else { return nil }
+        return choice.options.contains { option in
+            if case .handCard = option.target { return true }
+            return false
+        } ? choice : nil
+    }
+
+    /// Hand positions the open prompt offers, for the strip to light up.
+    private var handChoiceTargets: Set<Int>? {
+        guard let choice = handChoice, choice.player == nearSlot else { return nil }
+        return Set(choice.options.compactMap { option in
+            if case .handCard(let index) = option.target { return index }
+            return nil
+        })
+    }
+
+    /// Hand positions already staged for a prompt that takes several.
+    private var stagedHandIndices: Set<Int> {
+        guard let choice = handChoice else { return [] }
+        return Set(stagedChoiceKeys.compactMap { key -> Int? in
+            guard case .handCard(let index)? = choice.option(forKey: key)?.target else { return nil }
+            return index
+        })
     }
 
     /// A tap on the mat while a board-picked prompt is open.
@@ -1218,11 +1374,30 @@ private struct BoardStage: View {
 
     // MARK: Contextual actions
 
+    /// What the reader offers right now, with the card viewer on the end.
+    ///
+    /// "Card details" is the named way into the full-screen viewer — the mat's
+    /// long press is the quick one — and it is last because it never changes
+    /// the game, so on a phone, where only the first three buttons fit, it
+    /// gives way to anything that does.
     private var contextActions: [BoardAction] {
         if engine.isFinished {
             return [BoardAction(id: "again", title: "Play again", style: .primary, perform: onPlayAgain)]
         }
+        return turnActions + detailsAction
+    }
 
+    /// The full-screen viewer, offered whenever the reader holds a card.
+    private var detailsAction: [BoardAction] {
+        guard let focusedCard else { return [] }
+        return [
+            BoardAction(id: "details", title: "Card details", shortTitle: "Details") {
+                zoomedCard = ZoomedCard(focusedCard)
+            }
+        ]
+    }
+
+    private var turnActions: [BoardAction] {
         if let awaiting = engine.state.awaitingMulligan {
             guard isHumanControlled(awaiting) else { return [] }
             return [
@@ -1279,10 +1454,14 @@ private struct BoardStage: View {
         return actions
     }
 
+    /// A prompt over the hand is picking cards; one over the mat is picking
+    /// targets. The button says which, because they are not the same thing and
+    /// a player mid-effect has no other clue.
     private func confirmChoiceTitle(_ choice: PendingChoice) -> String {
-        guard choice.maxSelections > 1 else { return "Confirm the target" }
+        let noun = handChoice == nil ? "target" : "card"
+        guard choice.maxSelections > 1 else { return "Confirm the \(noun)" }
         let count = stagedChoiceKeys.count
-        return count == 1 ? "Confirm 1 target" : "Confirm \(count) targets"
+        return count == 1 ? "Confirm 1 \(noun)" : "Confirm \(count) \(noun)s"
     }
 
     /// The one control that reaches every printed box on the cards a player
@@ -1306,7 +1485,7 @@ private struct BoardStage: View {
             perform(.endTurn, by: engine.currentPlayer)
             return
         }
-        confirmation = .endTurn
+        ask(.endTurn)
     }
 
     private var soundBinding: Binding<Bool> {
@@ -1326,6 +1505,14 @@ private struct BoardStage: View {
         by slot: PlayerSlot,
         announcesErrors: Bool = true
     ) -> Bool {
+        let before = BoardSnapshot(engine: engine)
+
+        // Measured before the rules run. A declaration nobody can answer rests
+        // the attacker, resolves and takes the target off the mat inside this
+        // single call, so the two cards have to be found while they are both
+        // still on it — see `AttackShot`.
+        let shot = plannedShot(for: action, by: slot)
+
         switch engine.apply(action, by: slot) {
         case .success:
             // The panels hold a snapshot of a board that has just moved, so
@@ -1334,17 +1521,304 @@ private struct BoardStage: View {
             handPanel = nil
             offerSheet = nil
             withAnimation(.easeOut(duration: 0.22)) {
+                confirmation = nil
                 armedAttacker = nil
                 selectedHandIndex = nil
                 stagedChoiceKeys.removeAll()
                 banner = nil
             }
+            if let shot { attackShot = shot }
+            react(to: before)
             revision += 1
             return true
 
         case .failure(let error):
             if announcesErrors { show(error.message) }
             return false
+        }
+    }
+
+    // MARK: Feedback
+
+    /// Turns what the action changed into what the mat shows.
+    ///
+    /// The engine reports nothing about its own resolution — it validates,
+    /// mutates and journals — so the two pieces of feedback the board owes are
+    /// worked out here by comparing the position either side of `apply`. Damage
+    /// and life come from the board itself; a jutsu going off comes from the
+    /// one line the engine writes when a chain link resolves, because a card
+    /// played from hand is created and disposed of inside a single `apply` and
+    /// leaves no trace on either side of it.
+    private func react(to before: BoardSnapshot) {
+        // A number aimed at a body that has since left the board is drawn by
+        // nothing and can therefore never report itself finished, so it is
+        // swept here rather than left to pile up over a long game.
+        damageFlashes.removeAll { flash in
+            guard case .character(let id) = flash.target else { return false }
+            return engine.locateCharacter(id: id) == nil
+        }
+
+        // A reveal whose slot the engine has refilled is drawn by nothing from
+        // here on — the card set into the slot is the real occupant — so it can
+        // never report itself finished either, and gets the same sweep.
+        supportReveals.removeAll { reveal in
+            let supports = engine.side(reveal.slot).supports
+            guard reveal.slotIndex < supports.count,
+                  let placed = supports[reveal.slotIndex] else { return false }
+            return placed.id != reveal.supportID
+        }
+
+        damageFlashes.append(contentsOf: landedHits(since: before))
+        supportReveals.append(contentsOf: turnedSupports(since: before))
+        queueJutsuEffects(since: before)
+    }
+
+    /// Every Support that turned face-up in this action.
+    ///
+    /// Two shapes count as turning up. One is a card still sitting in its slot
+    /// with its reveal flag newly set: a Support on the chain, waiting out the
+    /// window it opened. The other is a card that has left its slot entirely,
+    /// which is what happens when the chain resolves inside the same `apply` —
+    /// and the only two ways out of a Support slot are resolving on the chain
+    /// and being negated on it. Both put the card on the chain first, so a
+    /// departure is always a card both players have already seen, and drawing
+    /// it leaks nothing.
+    ///
+    /// A card that was face-up before it left is marked as such, so the hold
+    /// that keeps it in the emptied slot does not blur it back down and focus
+    /// it a second time.
+    ///
+    /// A card the pool cannot name is skipped: the slot would draw nothing for
+    /// it, and a reveal nothing draws is a reveal nothing can report finished.
+    private func turnedSupports(since before: BoardSnapshot) -> [SupportReveal] {
+        var found: [SupportReveal] = []
+
+        for slot in PlayerSlot.allCases {
+            let was = before.supports[slot] ?? []
+            let now = engine.side(slot).supports
+
+            for index in was.indices {
+                guard let held = was[index] else { continue }
+                let current = index < now.count ? now[index] : nil
+
+                let turnedUp: Bool
+                let wasAlreadyUp: Bool
+                if let current, current.id == held.id {
+                    turnedUp = current.isRevealed && !held.isRevealed
+                    wasAlreadyUp = false
+                } else {
+                    turnedUp = true
+                    wasAlreadyUp = held.isRevealed
+                }
+
+                guard turnedUp, database.card(id: held.cardID) != nil else { continue }
+                // One hold at a time per card: a Support that resolves before
+                // the hold it earned on activation has run out keeps that one
+                // rather than starting a second.
+                guard !supportReveals.contains(where: { $0.supportID == held.id }) else { continue }
+
+                found.append(SupportReveal(
+                    supportID: held.id,
+                    slot: slot,
+                    slotIndex: index,
+                    cardID: held.cardID,
+                    wasAlreadyUp: wasAlreadyUp
+                ))
+            }
+        }
+        return found
+    }
+
+    /// Every hit worth a floating number: damage that landed on a body still in
+    /// play, and life that came off — or went onto — a Leader.
+    ///
+    /// A body that was knocked out is deliberately absent. It is no longer on
+    /// the mat by the time this runs, and leaving the row is already the
+    /// treatment a knockout gets.
+    private func landedHits(since before: BoardSnapshot) -> [DamageFlash] {
+        var flashes: [DamageFlash] = []
+
+        for slot in PlayerSlot.allCases {
+            let side = engine.side(slot)
+
+            if let was = before.life[slot], was != side.life {
+                flashes.append(DamageFlash(
+                    target: .leader(slot),
+                    amount: abs(side.life - was),
+                    kind: side.life < was ? .damage : .heal
+                ))
+            }
+
+            for character in side.characters {
+                guard let was = before.damage[character.id], character.damage > was else { continue }
+                flashes.append(DamageFlash(
+                    target: .character(character.id),
+                    amount: character.damage - was,
+                    kind: .damage
+                ))
+            }
+        }
+        return flashes
+    }
+
+    /// Reads the lines this action wrote and queues an effect for each jutsu
+    /// that resolved in it.
+    private func queueJutsuEffects(since before: BoardSnapshot) {
+        for line in before.linesAdded(to: engine.journal) {
+            guard let effect = JutsuLookup.effect(for: line, in: database) else { continue }
+            jutsuQueue.append(JutsuPlay(effect: effect))
+        }
+        if jutsuQueue.count > Self.jutsuQueueLimit {
+            jutsuQueue.removeFirst(jutsuQueue.count - Self.jutsuQueueLimit)
+        }
+        startNextJutsu()
+    }
+
+    /// Starts the next queued effect when nothing is playing. Effects play one
+    /// at a time: two flares over the same board at once read as one long
+    /// smear rather than as two jutsu.
+    private func startNextJutsu() {
+        guard jutsuPlaying == nil, !jutsuQueue.isEmpty else { return }
+        jutsuPlaying = jutsuQueue.removeFirst()
+    }
+
+    /// The jutsu effect, over the whole board.
+    ///
+    /// Presentation only. The engine resolved before this was ever installed,
+    /// so the overlay takes no touches at all — a player who taps through it is
+    /// playing the board underneath rather than waiting on a picture, and one
+    /// who never looks up loses nothing.
+    @ViewBuilder
+    private var jutsuOverlay: some View {
+        if let play = jutsuPlaying {
+            JutsuEffectView(effect: play.effect) {
+                jutsuPlaying = nil
+                startNextJutsu()
+            }
+            .id(play.id)
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// Clears an effect that never reported itself finished.
+    ///
+    /// `JutsuEffectView` reports when its clock runs out, but only while it is
+    /// mounted. A board torn down and rebuilt under it would otherwise leave
+    /// `jutsuPlaying` set forever, and every effect queued behind it would wait
+    /// on a picture that is no longer on screen. The slack is generous because
+    /// this is a backstop, not the schedule.
+    private func sweepJutsu() async {
+        guard let current = jutsuPlaying else { return }
+        try? await Task.sleep(for: .seconds(current.effect.duration + 1))
+        guard !Task.isCancelled, jutsuPlaying?.id == current.id else { return }
+        jutsuPlaying = nil
+        startNextJutsu()
+    }
+
+    // MARK: Attack shots
+
+    /// The declared attack, drawn over the whole mat.
+    ///
+    /// The endpoints the cards published resolve here, in this overlay's own
+    /// space, and every resolved centre is kept in `cardCentres` so a shot can
+    /// be aimed by `plannedShot(for:by:)` at cards that are about to leave.
+    ///
+    /// Presentation only, like the jutsu overlay above it: the rules have
+    /// already decided the attack by the time a shot exists, so it takes no
+    /// touches and nothing waits on it.
+    @ViewBuilder
+    private func projectileLayer(
+        _ anchors: [ProjectileAnchor: Anchor<CGRect>],
+        in proxy: GeometryProxy
+    ) -> some View {
+        let centres = anchors.mapValues { proxy.projectileCentre(of: $0) }
+
+        ZStack {
+            if let shot = attackShot {
+                AttackProjectileView(
+                    from: shot.from,
+                    to: shot.to,
+                    style: shot.style,
+                    salt: shot.salt,
+                    onFinished: { attackShot = nil }
+                )
+                .id(shot.id)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+        .onChange(of: centres, initial: true) { _, latest in cardCentres.points = latest }
+    }
+
+    /// The shot an action is about to throw, measured on the board as it
+    /// currently stands. `nil` for anything that is not a declaration, and for
+    /// a declaration whose two cards have not been measured yet.
+    private func plannedShot(for action: GameAction, by slot: PlayerSlot) -> AttackShot? {
+        guard case .declareAttack(let attacker, let target) = action else { return nil }
+        let centres = cardCentres.points
+        guard let from = centres[anchor(for: attacker, on: slot)],
+              let to = centres[anchor(for: target, on: slot.opposing)] else { return nil }
+
+        return AttackShot(
+            from: from,
+            to: to,
+            style: shotStyle(for: attacker, on: slot),
+            salt: UInt64(max(0, revision))
+        )
+    }
+
+    private func anchor(for attacker: AttackerReference, on slot: PlayerSlot) -> ProjectileAnchor {
+        switch attacker {
+        case .leader:            return .leader(slot)
+        case .character(let id): return .character(id)
+        }
+    }
+
+    private func anchor(for target: AttackTarget, on slot: PlayerSlot) -> ProjectileAnchor {
+        switch target {
+        case .leader:            return .leader(slot)
+        case .character(let id): return .character(id)
+        }
+    }
+
+    /// Which of the two shots an attacker throws.
+    ///
+    /// Split on the printed colour, which is the one difference between cards a
+    /// player already reads off the mat — so the shot repeats something they
+    /// know rather than teaching them a third vocabulary. Blue arcs; red and
+    /// green burn.
+    private func shotStyle(
+        for attacker: AttackerReference,
+        on slot: PlayerSlot
+    ) -> AttackProjectileView.Style {
+        let card: Card?
+        switch attacker {
+        case .leader:
+            card = engine.leaderCard(for: slot)
+        case .character(let id):
+            card = engine.side(slot).character(id: id).flatMap { engine.card(for: $0) }
+        }
+        return card?.color == .blue ? .energy : .fireball
+    }
+
+    /// Clears a shot the projectile itself never reported.
+    ///
+    /// The view reports when it has landed, but only while it is mounted, and a
+    /// board that re-laid itself out from under the shot would otherwise leave
+    /// `attackShot` set and swallow every declaration after it.
+    private func sweepAttackShot() async {
+        guard let current = attackShot else { return }
+        try? await Task.sleep(for: .seconds(ProjectileTiming.total + 0.8))
+        guard !Task.isCancelled, attackShot?.id == current.id else { return }
+        attackShot = nil
+    }
+
+    /// The full-screen card viewer.
+    @ViewBuilder
+    private var zoomOverlay: some View {
+        if let request = zoomedCard {
+            CardZoomOverlay(card: request.card) { zoomedCard = nil }
+                .id(request.id)
         }
     }
 
@@ -1357,22 +1831,30 @@ private struct BoardStage: View {
         guard aiOwesAMove else { return }
         try? await Task.sleep(for: Self.aiDelay)
         guard !Task.isCancelled, aiOwesAMove else { return }
-        takeAIMove()
+        await takeAIMove()
     }
 
     private var aiOwesAMove: Bool {
         configuration.mode == .versusAI && !engine.isFinished && engine.decider == .opponent
     }
 
-    /// Asks the AI for one move. A refusal is never fatal: the board falls back
-    /// to the first legal action, so a mistaken AI slows the game down rather
-    /// than freezing it.
-    private func takeAIMove() {
-        let ai = SimpleAI()
-        if let action = ai.chooseAction(engine: engine, slot: .opponent),
-           perform(action, by: .opponent, announcesErrors: false) {
-            return
-        }
+    /// Asks the AI for one move, at the strength the player chose.
+    ///
+    /// The tier is read here rather than captured when the game was built, so
+    /// the choice made before the game — and any change made in Settings during
+    /// it — lands on the AI's very next decision. Everything above genin
+    /// searches off the main actor, so the board is re-checked afterwards: a
+    /// game that finished or moved on while the search ran gets nothing rather
+    /// than a stale action.
+    ///
+    /// A refusal is never fatal: the board falls back to the first legal
+    /// action, so a mistaken AI slows the game down rather than freezing it.
+    private func takeAIMove() async {
+        let chosen = await settings.aiDifficulty.chooseAction(engine: engine, slot: .opponent)
+        guard !Task.isCancelled, aiOwesAMove else { return }
+
+        if let chosen, perform(chosen, by: .opponent, announcesErrors: false) { return }
+
         for action in engine.legalActions(for: .opponent) where !isConcede(action) {
             if perform(action, by: .opponent, announcesErrors: false) { return }
         }
@@ -1403,7 +1885,7 @@ private struct BoardStage: View {
                 .padding(.vertical, Metrics.spacingS)
                 .notchedPanel(notch: 8, fill: Palette.panelActive, stroke: Palette.negative)
                 .padding(.top, Metrics.spacingS)
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
                 .allowsHitTesting(false)
                 .accessibilityAddTraits(.isStaticText)
         }
@@ -1498,19 +1980,77 @@ private struct BoardStage: View {
         }
     }
 
-    private var confirmationBinding: Binding<Bool> {
-        Binding(
-            get: { confirmation != nil },
-            set: { if !$0 { confirmation = nil } }
-        )
+    /// Everything the board draws along the bottom, in order of urgency.
+    ///
+    /// A held decision outranks an open response window: the window is a
+    /// question the player has already started answering, and stacking two
+    /// panels on the same edge would hide half of each.
+    @ViewBuilder
+    private var bottomPanel: some View {
+        if let confirmation {
+            BoardConfirmPanel(
+                title: title(for: confirmation),
+                message: message(for: confirmation),
+                confirmTitle: confirmTitle(for: confirmation),
+                confirmStyle: confirmStyle(for: confirmation),
+                cancelTitle: cancelTitle(for: confirmation),
+                isCompact: horizontalSizeClass == .compact,
+                onConfirm: { commit(confirmation) },
+                onCancel: { dismissConfirmation() }
+            )
+            .padding(Metrics.spacingS)
+            .transition(panelTransition)
+        } else {
+            responsePanel
+        }
     }
 
-    private var confirmationTitle: String {
-        guard let confirmation else { return "" }
-        switch confirmation {
+    /// How a panel arrives at the bottom edge. Reduce Motion keeps the fade
+    /// and drops the travel, which is the whole of the difference.
+    private var panelTransition: AnyTransition {
+        reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity)
+    }
+
+    private func title(for pending: BoardConfirmation) -> String {
+        switch pending {
         case .attack:  return "Declare the attack?"
         case .endTurn: return "End your turn?"
         case .leave:   return "Leave the game?"
+        }
+    }
+
+    private func confirmTitle(for pending: BoardConfirmation) -> String {
+        switch pending {
+        case .attack:  return "Attack"
+        case .endTurn: return "End turn"
+        case .leave:   return "Leave the game"
+        }
+    }
+
+    private func confirmStyle(for pending: BoardConfirmation) -> WideButton.Style {
+        switch pending {
+        case .attack, .endTurn: return .primary
+        case .leave:            return .destructive
+        }
+    }
+
+    private func cancelTitle(for pending: BoardConfirmation) -> String {
+        switch pending {
+        case .attack:  return "Cancel"
+        case .endTurn: return "Not yet"
+        case .leave:   return "Stay"
+        }
+    }
+
+    private func commit(_ pending: BoardConfirmation) {
+        switch pending {
+        case .attack(let attacker, let target, _):
+            perform(.declareAttack(attacker: attacker, target: target), by: engine.currentPlayer)
+        case .endTurn:
+            perform(.endTurn, by: engine.currentPlayer)
+        case .leave:
+            confirmation = nil
+            router.popToRoot()
         }
     }
 
@@ -1536,23 +2076,219 @@ private struct BoardStage: View {
             return "The game is not saved, so leaving ends it."
         }
     }
+}
+
+// MARK: - Held decisions
+
+/// One jutsu resolution the board still owes an effect.
+///
+/// The identity is per play rather than per effect: `JutsuEffectView` starts
+/// its clock when it is installed, so two plays of the same effect need two
+/// identities or the second one inherits the first one's finished timeline.
+private struct JutsuPlay: Identifiable, Equatable {
+    let id = UUID()
+    let effect: JutsuEffect
+}
+
+/// One declared attack the mat is still drawing.
+///
+/// It carries two points rather than the two cards' endpoints, and that is the
+/// whole reason it exists as a type. A declaration nobody can answer opens its
+/// window, auto-passes, resolves and knocks the target out inside a single
+/// `apply` — so by the time the first frame of the shot is drawn there may be
+/// nothing left at the far end to aim at. The points are read off the mat at
+/// the moment of the declaration, while both cards are still on it.
+private struct AttackShot: Identifiable, Equatable {
+
+    /// Per shot, so a second declaration in the same turn restarts the clock
+    /// rather than inheriting the first one's finished flight.
+    let id = UUID()
+
+    let from: CGPoint
+    let to: CGPoint
+    let style: AttackProjectileView.Style
+
+    /// Seeds the spray, so two shots in a turn do not throw the identical one.
+    let salt: UInt64
+}
+
+/// Where the cards on the mat currently are, in the projectile overlay's space.
+///
+/// A box rather than a value in `@State`, because nothing on screen depends on
+/// it: the board writes it on every layout pass and reads it exactly once, at
+/// the instant an attack is declared. Held as state it would invalidate the
+/// whole mat every time a card moved — a full re-render per frame of every
+/// summon and every rest, to keep a figure no view draws.
+@MainActor
+private final class CardCentres {
+    var points: [ProjectileAnchor: CGPoint] = [:]
+}
+
+/// What the board has to remember about a position in order to tell what an
+/// accepted action changed.
+private struct BoardSnapshot {
+
+    /// Damage on every body in play, by in-play identity.
+    let damage: [UUID: Int]
+
+    /// Life on both Leaders.
+    let life: [PlayerSlot: Int]
+
+    /// Both Support rows as they stood. A card can be revealed, resolved and
+    /// taken off the mat inside one `apply`, so this is the only place the
+    /// board can still find out that it was ever there.
+    let supports: [PlayerSlot: [PlacedSupport?]]
+
+    /// How long the journal was, so only the lines this action wrote are read.
+    let journalCount: Int
+
+    /// The last line before the action. The journal drops its head once it
+    /// passes its cap, so a position is safer than a count.
+    let journalMark: UUID?
+
+    init(engine: GameEngine) {
+        var damage: [UUID: Int] = [:]
+        var life: [PlayerSlot: Int] = [:]
+        var supports: [PlayerSlot: [PlacedSupport?]] = [:]
+        for slot in PlayerSlot.allCases {
+            let side = engine.side(slot)
+            life[slot] = side.life
+            supports[slot] = side.supports
+            for character in side.characters {
+                damage[character.id] = character.damage
+            }
+        }
+        self.damage = damage
+        self.life = life
+        self.supports = supports
+        self.journalCount = engine.journal.count
+        self.journalMark = engine.journal.latest?.id
+    }
+
+    /// The lines written since this snapshot was taken. Found by position where
+    /// the marker survives, and by the change in length where it does not.
+    func linesAdded(to journal: Journal) -> [String] {
+        if let journalMark,
+           let index = journal.entries.lastIndex(where: { $0.id == journalMark }) {
+            return journal.entries[(index + 1)...].map(\.message)
+        }
+        return journal.entries.suffix(max(0, journal.count - journalCount)).map(\.message)
+    }
+}
+
+// MARK: - Jutsu art direction
+
+/// Which effect a resolving jutsu plays.
+///
+/// The pool names its jutsu in the SUPPORT line — `Card.jutsuName` is the half
+/// before the dash — and the engine journals "<name> resolves." when a chain
+/// link goes off. That line is the board's only signal that a jutsu happened at
+/// all, because a card played from hand is created and disposed of inside a
+/// single `apply`, so the table is keyed by the whole sentence.
+///
+/// Two of the pool's jutsu are named effects and the rest flare. Sasuke's
+/// "Chidori: One Thousand Birds" is the one electric jutsu, and Shisui's "Koto
+/// Amatsukami" is a Sharingan genjutsu — an eye, not an arc. Both are matched
+/// on the jutsu name printed in the card's SUPPORT bar rather than on a
+/// collector number, because a reprint keeps the name and changes the number.
+///
+/// Both play over the whole screen, above both halves of the field. A jutsu
+/// that empties the board of Characters, or that shuts a player's chakra down
+/// for a turn and a half, is an event on the table rather than something that
+/// happened to one card.
+@MainActor
+private enum JutsuLookup {
+
+    /// The pool the table was built from. Starts at a revision no database can
+    /// hold, so the first ask always fills it.
+    private static var revision = -1
+    private static var table: [String: JutsuEffect] = [:]
+
+    static func effect(for line: String, in database: CardDatabase) -> JutsuEffect? {
+        if revision != database.poolRevision {
+            table = Dictionary(
+                database.cards.compactMap { card -> (String, JutsuEffect)? in
+                    guard card.supportBarAbility != nil else { return nil }
+                    return ("\(card.jutsuName) resolves.", effect(named: card.jutsuName))
+                },
+                uniquingKeysWith: { first, _ in first }
+            )
+            revision = database.poolRevision
+        }
+        return table[line]
+    }
+
+    private static func effect(named jutsuName: String) -> JutsuEffect {
+        if jutsuName.localizedCaseInsensitiveContains("chidori") { return .chidori }
+        if jutsuName.localizedCaseInsensitiveContains("amatsukami") { return .sharingan }
+        return .generic
+    }
+}
+
+// MARK: - Confirmation panel
+
+/// A decision held over the board until the player says yes.
+///
+/// It is a panel on the mat rather than a system dialog for the same reason the
+/// response window is one: what is being confirmed — the lit attacker, the lit
+/// target, the board a turn is about to be handed over on — is on the mat, and
+/// an alert covers exactly the thing the player is deciding about. It also lets
+/// the two answers carry the words that belong to them, so "End turn" and
+/// "Not yet" replace an OK and a Cancel that mean nothing on their own.
+struct BoardConfirmPanel: View {
+
+    /// The question, as a question.
+    let title: String
+
+    /// What saying yes will do, and anything it costs that is not obvious.
+    let message: String
+
+    let confirmTitle: String
+    var confirmStyle: WideButton.Style = .primary
+    let cancelTitle: String
+
+    /// Compact stacks the two answers, which a phone has no room for side by
+    /// side once either of them carries more than a word.
+    let isCompact: Bool
+
+    let onConfirm: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+            Text(title)
+                .font(Typeface.display(isCompact ? 15 : 18, weight: .bold))
+                .foregroundStyle(Palette.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(message)
+                .font(Typeface.body(isCompact ? 12 : 13))
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            answers
+        }
+        .padding(Metrics.spacingM)
+        .frame(maxWidth: 520)
+        .notchedPanel(fill: Palette.panel.opacity(0.97), stroke: Palette.accent)
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+        .accessibilityLabel(title)
+    }
 
     @ViewBuilder
-    private func confirmationActions(_ pending: BoardConfirmation) -> some View {
-        switch pending {
-        case .attack(let attacker, let target, _):
-            Button("Attack") {
-                perform(.declareAttack(attacker: attacker, target: target), by: engine.currentPlayer)
+    private var answers: some View {
+        if isCompact {
+            VStack(spacing: Metrics.spacingS) {
+                WideButton(title: confirmTitle, style: confirmStyle, action: onConfirm)
+                WideButton(title: cancelTitle, action: onCancel)
             }
-            Button("Cancel", role: .cancel) { confirmation = nil }
-
-        case .endTurn:
-            Button("End turn") { perform(.endTurn, by: engine.currentPlayer) }
-            Button("Cancel", role: .cancel) { confirmation = nil }
-
-        case .leave:
-            Button("Leave the game", role: .destructive) { router.popToRoot() }
-            Button("Stay", role: .cancel) { confirmation = nil }
+        } else {
+            HStack(spacing: Metrics.spacingS) {
+                WideButton(title: confirmTitle, style: confirmStyle, action: onConfirm)
+                WideButton(title: cancelTitle, action: onCancel)
+            }
         }
     }
 }
@@ -1814,11 +2550,13 @@ struct ResponseWindowPanel: View {
 
 // MARK: - Prompt sheet
 
-/// The panel for a prompt the mat cannot show: a card in hand to put back on
-/// the deck, a body in the trash to revive, a search through deck and trash.
+/// The panel for a prompt over a zone the board cannot draw: a body in the
+/// trash to revive, a search through deck and trash.
 ///
-/// Board-picked prompts never reach here — those are answered by tapping the
-/// card itself, which is the whole reason the mat highlights them.
+/// Nothing the player can see reaches here. A pick over the mat or over their
+/// own hand is answered by tapping the card itself, which is the whole reason
+/// those cards light up — a list of names beside a board that shows the same
+/// cards is asking the player to match one to the other for no reason.
 struct ChoicePanel: View {
 
     let choice: PendingChoice
@@ -1997,6 +2735,26 @@ enum BoardPreview {
         return engine
     }
 
+    /// A game with one card set face-down in a Support slot, and the side it
+    /// was set on.
+    ///
+    /// Only the player taking the turn may set a card, and which of the two
+    /// that is depends on the mulligan this seed produced — so the side is
+    /// reported back rather than assumed. A hand with nothing settable in it
+    /// leaves the row empty, which the mat draws just as happily.
+    static func engineWithASetSupport(
+        database: CardDatabase
+    ) -> (engine: GameEngine, slot: PlayerSlot) {
+        let engine = self.engine(database: database)
+        let slot = engine.currentPlayer
+        for handCard in engine.handCards(for: slot) {
+            if case .success = engine.apply(.setSupport(handIndex: handCard.id), by: slot) {
+                break
+            }
+        }
+        return (engine, slot)
+    }
+
     /// The three-mode action panel for one card, built by hand.
     ///
     /// A preview cannot reach a board where a summon has already been spent or
@@ -2138,30 +2896,63 @@ enum BoardPreview {
     .environment(database)
 }
 
-/// A prompt over a hidden zone: the Leader's dig, which puts a card from hand
-/// back on top of the deck.
-#Preview("Choosing from hand") {
+/// The two confirmations the board holds, in place of the system dialog they
+/// replace. Both are drawn over the mat, so the attacker and the target the
+/// first one is about stay visible behind it.
+#Preview("Confirming in-board") {
+    VStack(spacing: Metrics.spacingM) {
+        BoardConfirmPanel(
+            title: "Declare the attack?",
+            message: "Kakashi Hatake attacks the Opponent's Leader and rests.",
+            confirmTitle: "Attack",
+            cancelTitle: "Cancel",
+            isCompact: true,
+            onConfirm: {},
+            onCancel: {}
+        )
+
+        BoardConfirmPanel(
+            title: "Leave the game?",
+            message: "The game is not saved, so leaving ends it.",
+            confirmTitle: "Leave the game",
+            confirmStyle: .destructive,
+            cancelTitle: "Stay",
+            isCompact: false,
+            onConfirm: {},
+            onCancel: {}
+        )
+    }
+    .padding()
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(AmbientBackground())
+}
+
+/// A prompt over a zone the mat cannot draw. Hand and board picks are answered
+/// by tapping the card itself now, so the trash is the case left for the sheet:
+/// there is nowhere on the board a card in the trash is shown.
+#Preview("Choosing from the trash") {
     let database = CardDatabase()
-    let hand = Array(database.cards.filter { $0.type == .character }.prefix(4))
+    let buried = Array(database.cards.filter { $0.type == .character }.prefix(4))
 
     return ChoicePanel(
         choice: PendingChoice(
             id: UUID(),
-            kind: .leaderPutBack,
+            kind: .reviveFromTrash,
             player: .player,
-            prompt: "Place 1 card from your hand on top of your deck.",
-            options: hand.enumerated().map { entry in
+            prompt: "Summon 1 Character from your trash.",
+            options: buried.enumerated().map { entry in
                 ChoiceOption(
-                    key: "hand-\(entry.offset)",
-                    target: .handCard(index: entry.offset),
+                    key: "trash-\(entry.offset)",
+                    target: .trashCard(slot: .player, index: entry.offset),
                     title: entry.element.name
                 )
-            }
+            },
+            cancellable: true
         ),
-        title: "Place 1 card from your hand on top of your deck.",
-        subtitle: "Sasuke Uchiha",
+        title: "Summon 1 Character from your trash.",
+        subtitle: "Gamabunta",
         onResolve: { _ in },
-        onCancel: nil
+        onCancel: {}
     )
     .environment(database)
 }

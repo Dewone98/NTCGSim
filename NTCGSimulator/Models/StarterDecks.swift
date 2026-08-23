@@ -237,7 +237,6 @@ extension StarterDecks {
         }
     }
 }
-#endif
 
 // MARK: - Preview
 
@@ -261,3 +260,9 @@ extension StarterDecks {
     .background(Palette.backdrop)
     .environment(database)
 }
+
+// `legalityReport` above is Debug-only, and this preview is its only
+// caller — so the guard has to cover both. Leaving the preview outside it
+// compiled fine in Debug and broke the Release build, which is the
+// configuration a real device actually installs.
+#endif

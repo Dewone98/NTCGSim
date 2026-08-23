@@ -16,10 +16,21 @@ struct SettingsView: View {
     @Environment(Router.self) private var router
     @Environment(SettingsStore.self) private var settings
     @Environment(CardDatabase.self) private var database
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// The app's one music player. It is not injected because music outlives
+    /// every screen — see `MusicPlayer.shared`.
+    private let music = MusicPlayer.shared
 
     /// Local mirror of the username so the store is only written on commit,
     /// rather than on every keystroke.
     @State private var draftUsername = ""
+
+    /// Local mirror of the music level. A slider wants to be heard while it is
+    /// being dragged but is only worth writing to disk on release, so the drag
+    /// goes straight to the player and the store is set when the thumb is let
+    /// go.
+    @State private var draftVolume: Double = 0.6
 
     /// Moving focus away from the field counts as a commit, the same as Done.
     @FocusState private var isUsernameFocused: Bool
@@ -52,8 +63,10 @@ struct SettingsView: View {
                     targetConfirmationRow(selection: $settings.targetConfirm)
                     jutsuSummonRow(isOn: $settings.confirmJutsuSummon)
                     endTurnRow(selection: $settings.endTurnConfirm)
+                    aiDifficultyRow(selection: $settings.aiDifficulty)
                     soundRow(isOn: $settings.soundEnabled)
                     chatSoundRow(isOn: $settings.chatSoundEnabled)
+                    musicRow
                     usernameRow
                     cardDataRow
                 }
@@ -61,7 +74,15 @@ struct SettingsView: View {
             }
             .scrollDismissesKeyboard(.interactively)
         }
-        .onAppear { draftUsername = settings.username }
+        .onAppear {
+            draftUsername = settings.username
+            draftVolume = settings.musicVolume
+        }
+        .onChange(of: settings.musicVolume) { _, level in
+            // Kept in step in case the level is changed anywhere but this
+            // slider, so the thumb never shows a stale position.
+            draftVolume = level
+        }
         .fileImporter(
             isPresented: $isImporting,
             allowedContentTypes: [.json],
@@ -188,6 +209,43 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: AI difficulty
+
+    /// The four tiers, each with the line that says what it actually does.
+    ///
+    /// Listed rather than reduced to a chip row because the names are ranks
+    /// and rank names carry no information on their own — "Jonin" tells nobody
+    /// that it searches but cannot see your hand. The same choice is offered
+    /// again on the screen a game starts from, which is where most players will
+    /// meet it; both write here.
+    private func aiDifficultyRow(selection: Binding<AIDifficulty>) -> some View {
+        SettingRow(
+            title: "AI difficulty",
+            explanation: "How hard the computer opponent plays. It can also be changed on the screen where a game starts."
+        ) {
+            VStack(alignment: .leading, spacing: Metrics.spacingS) {
+                ForEach(AIDifficulty.allCases) { tier in
+                    ChoiceRow(
+                        title: tier.title,
+                        subtitle: tier.detail,
+                        isSelected: selection.wrappedValue == tier
+                    ) {
+                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
+                            selection.wrappedValue = tier
+                        }
+                    }
+                }
+
+                Text("Genin never searches — it takes the best move in front of it. "
+                     + "Kage is the opponent the reference ships: it searches the true "
+                     + "state, your hand included, and is close to unbeatable.")
+                    .font(Typeface.body(12))
+                    .foregroundStyle(Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     // MARK: Sound
 
     private func soundRow(isOn: Binding<Bool>) -> some View {
@@ -211,6 +269,147 @@ struct SettingsView: View {
             Toggle("Chat notification sound", isOn: isOn)
                 .labelsHidden()
                 .tint(Palette.accent)
+        }
+    }
+
+    // MARK: Music
+
+    /// The music section.
+    ///
+    /// The app ships with no tracks of its own, so the empty case is the one
+    /// this row is designed around rather than an afterthought: it says plainly
+    /// that there is nothing, and prints the folder to put files in. The folder
+    /// line stays visible once there are tracks, because that is also where a
+    /// replacement goes.
+    private var musicRow: some View {
+        SettingRow(
+            title: "Music",
+            explanation: "Background music while you play. It mixes with whatever else your device is doing and follows the ring switch, so it never takes the sound away from anything else."
+        ) {
+            VStack(alignment: .leading, spacing: Metrics.spacingM) {
+                if music.library.isEmpty {
+                    musicEmptyNote
+                } else {
+                    musicChoices
+                    musicVolumeControl
+                }
+
+                musicStatus
+                musicFolderNote
+            }
+        }
+    }
+
+    private var musicChoices: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+            ChoiceRow(
+                title: "Off",
+                subtitle: "No music at all.",
+                isSelected: settings.musicSelection == .off
+            ) { choose(.off) }
+
+            ChoiceRow(
+                title: "Shuffle",
+                subtitle: "A different track every time one ends.",
+                isSelected: settings.musicSelection == .shuffle
+            ) { choose(.shuffle) }
+
+            ForEach(music.library.tracks) { track in
+                ChoiceRow(
+                    title: track.title,
+                    subtitle: "On repeat.",
+                    isSelected: settings.musicSelection == .track(id: track.id)
+                ) { choose(.track(id: track.id)) }
+            }
+        }
+    }
+
+    private func choose(_ selection: MusicSelection) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
+            settings.musicSelection = selection
+        }
+    }
+
+    private var musicVolumeControl: some View {
+        let isSilent = settings.musicSelection == .off
+
+        return VStack(alignment: .leading, spacing: Metrics.spacingXS) {
+            Text("Volume").sectionLabel()
+
+            HStack(spacing: Metrics.spacingS) {
+                Image(systemName: "speaker.fill")
+                    .font(Typeface.label(11))
+                    .foregroundStyle(Palette.textSecondary)
+                    .accessibilityHidden(true)
+
+                Slider(value: $draftVolume, in: 0...1) { isEditing in
+                    if !isEditing { settings.musicVolume = draftVolume }
+                }
+                .tint(Palette.accent)
+                .accessibilityLabel("Music volume")
+
+                Image(systemName: "speaker.wave.3.fill")
+                    .font(Typeface.label(11))
+                    .foregroundStyle(Palette.textSecondary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .onChange(of: draftVolume) { _, level in
+            // Heard immediately; written to the store only when the drag ends.
+            music.setVolume(level)
+        }
+        .disabled(isSilent)
+        .opacity(isSilent ? 0.45 : 1)
+    }
+
+    private var musicEmptyNote: some View {
+        statusLine(
+            "No music found. The app ships without any. Put mp3, m4a, aac or wav "
+            + "files in the folder below and tap Rescan — they appear here as a list.",
+            tint: Palette.textSecondary,
+            symbol: "music.note.list"
+        )
+    }
+
+    /// What the player is actually doing, which is not always what was chosen:
+    /// a track can be selected and the app still silent because the device is
+    /// playing the owner's own audio.
+    @ViewBuilder
+    private var musicStatus: some View {
+        if let track = music.nowPlaying {
+            statusLine("Now playing \(track.title).", tint: Palette.positive, symbol: "music.note")
+        } else if music.suspension == .otherAudio {
+            statusLine(
+                "Your device is already playing something, so the game stays quiet. "
+                + "The music starts when that stops.",
+                tint: Palette.warning,
+                symbol: "speaker.slash.fill"
+            )
+        }
+    }
+
+    private var musicFolderNote: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingXS) {
+            Text("Music folder").sectionLabel()
+
+            Text(music.library.addedTracksPath)
+                .font(Typeface.body(11).monospaced())
+                .foregroundStyle(Palette.textSecondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(Metrics.spacingS)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .notchedPanel(
+                    notch: 8,
+                    corners: .diagonal,
+                    fill: Palette.panelActive.opacity(0.5),
+                    stroke: Palette.border
+                )
+
+            WideButton(title: "Rescan for music", style: .secondary) {
+                music.refreshLibrary()
+            }
+            .padding(.top, Metrics.spacingXS)
         }
     }
 
@@ -394,6 +593,63 @@ private struct SettingRow<Control: View>: View {
     }
 }
 
+// MARK: - Choice row
+
+/// One item in a vertical list of mutually exclusive options: a name, a line
+/// about what it does, and a mark on the one in force.
+///
+/// The chip row handles two or three short labels; this handles the cases that
+/// outgrow it — four AI tiers that need explaining, and a music list whose
+/// length is whatever the owner's folder holds.
+private struct ChoiceRow: View {
+    let title: String
+    var subtitle: String? = nil
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: Metrics.spacingS) {
+                Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                    .font(Typeface.label(15))
+                    .foregroundStyle(isSelected ? Palette.accent : Palette.textSecondary)
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(Typeface.body(14))
+                        .foregroundStyle(Palette.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(Typeface.body(12))
+                            .foregroundStyle(Palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(Metrics.spacingS)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minHeight: 44)
+            // Tinted rather than merely stroked when selected: these rows sit
+            // on `panel`, which is white in the light theme, so a fill drawn
+            // from `surface` would be invisible there.
+            .notchedPanel(
+                notch: 8,
+                corners: .diagonal,
+                fill: isSelected ? Palette.accent.opacity(0.16) : Palette.panelActive.opacity(0.5),
+                stroke: isSelected ? Palette.accent.opacity(0.7) : Palette.border
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
+    }
+}
+
 // MARK: - Previews
 
 #Preview("Settings") {
@@ -428,6 +684,28 @@ private struct SettingRow<Control: View>: View {
                 Toggle("Sound", isOn: .constant(true))
                     .labelsHidden()
                     .tint(Palette.accent)
+            }
+        }
+        .padding(Metrics.spacingL)
+    }
+}
+
+#Preview("Choice rows") {
+    ZStack {
+        AmbientBackground()
+
+        SettingRow(
+            title: "AI difficulty",
+            explanation: "How hard the computer opponent plays."
+        ) {
+            VStack(alignment: .leading, spacing: Metrics.spacingS) {
+                ForEach(AIDifficulty.allCases) { tier in
+                    ChoiceRow(
+                        title: tier.title,
+                        subtitle: tier.detail,
+                        isSelected: tier == .kage
+                    ) { }
+                }
             }
         }
         .padding(Metrics.spacingL)

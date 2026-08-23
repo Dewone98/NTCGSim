@@ -11,6 +11,19 @@
 //  bodies — effects can flood the board past the printed mat — so the row
 //  scrolls horizontally once a sixth body arrives rather than clipping it.
 //
+//  Two things drawn here are rules rather than decoration. A face-down Support
+//  follows the information rule set out in `FaceDownStyle`: its owner's copy is
+//  the real printing behind a blur, because a player may look at what they set,
+//  and the other side's is a back, because a blur is no redaction when thirty-
+//  five printings are told apart by colour and silhouette alone. `isNear` is
+//  the whole of the test, and it is the half belonging to whoever is holding
+//  the device — the solo game hands the phone over, so the far half is always
+//  somebody else's.
+//
+//  And every card that can attack or be attacked publishes its frame as a
+//  projectile endpoint, so the board can fire a shot between two cards without
+//  either of them having to know where the other one is.
+//
 
 import SwiftUI
 
@@ -93,6 +106,126 @@ struct BoardEmphasis: Equatable {
     var leaderNote: String? = nil
 }
 
+// MARK: - Damage feedback
+
+/// One hit the mat is currently drawing a number for.
+///
+/// The board works these out by comparing the board either side of an accepted
+/// action: damage that landed on a body still in play, and life that came off a
+/// Leader. A body that was knocked out is deliberately never in this list — its
+/// treatment is leaving the row, and a "-4" floating over an empty slot says
+/// nothing a player can use.
+struct DamageFlash: Identifiable, Equatable {
+
+    /// Which card the number is thrown off.
+    enum Target: Hashable {
+        case character(UUID)
+        case leader(PlayerSlot)
+    }
+
+    /// Unique per hit rather than per card, so a second hit in the same slot
+    /// replays the animation instead of reusing the one already running.
+    let id = UUID()
+
+    let target: Target
+
+    /// Always positive. `kind` carries the sign and the colour.
+    let amount: Int
+
+    let kind: DamageNumberView.Kind
+}
+
+// MARK: - Support reveals
+
+/// One face-down Support caught in the act of turning face-up.
+///
+/// The engine reveals a Support and resolves it inside a single `apply`: the
+/// flag goes up, the box runs, and `disposeLink` empties the slot before the
+/// board is ever asked to draw a frame. Nobody can read a card that arrives and
+/// leaves between two frames — so the mat keeps its own note of it and goes on
+/// drawing it in a slot the engine has already cleared.
+///
+/// This is presentation and only presentation. The rules have finished with the
+/// card by the time one of these exists, so holding it on the mat delays no
+/// decision, blocks no tap and changes no outcome.
+///
+/// Nothing here leaks. A card only ever leaves a Support slot by resolving on
+/// the chain or by being negated on it, and both of those made it public first,
+/// so every card a reveal draws is one both players have already seen.
+struct SupportReveal: Identifiable, Equatable {
+
+    /// Unique per reveal rather than per card.
+    ///
+    /// One card can need two of these. A Support that opens a response window
+    /// is revealed when it goes on the chain and then sits in its slot until
+    /// the window is answered, so it is held a second time when it finally
+    /// leaves — and the second hold needs a clock of its own, not the spent
+    /// remains of the first one's.
+    let id = UUID()
+
+    /// The `PlacedSupport` this speaks for, which is what a slot is matched
+    /// on — so a second card set into the same slot cannot inherit the reveal
+    /// belonging to the one it replaced.
+    let supportID: UUID
+
+    /// Which half of the mat the slot belongs to.
+    let slot: PlayerSlot
+
+    /// Zero-based Support slot, which is where the card is drawn.
+    let slotIndex: Int
+
+    /// Collector number rather than a `Card`, because the board's copy has to
+    /// outlive the engine's and the engine's is already gone.
+    let cardID: String
+
+    /// Whether the card was already face-up on the mat when this reveal began.
+    ///
+    /// It is the difference between the two holds. The first turns a set card
+    /// up and is a focus pull; the second only keeps a card that is already
+    /// legible on screen a moment longer, and blurring it back down so it can
+    /// sharpen a second time would read as a fault rather than as an effect.
+    let wasAlreadyUp: Bool
+
+    /// How long the card stays readable once it has turned up. The reference
+    /// holds an activated Support about this long before the slot empties —
+    /// long enough to read a name and an effect line, short enough that the
+    /// answer to it does not feel held back.
+    static let hold: Duration = .seconds(1.5)
+
+    /// How long the blur takes to clear. The card is coming into focus, not
+    /// travelling, so it is over quickly.
+    static let turn: Double = 0.32
+}
+
+// MARK: - Pool lookups
+
+/// Answers about the pool that the mat would otherwise work out again on every
+/// render.
+///
+/// `BoardSideView.body` runs again on every engine mutation — a draw, a summon,
+/// a chakra flip, a highlight changing — and it runs twice, once per side.
+/// Finding the Summon card by scanning the pool inside that path meant a linear
+/// search per side per pass for an answer that only changes when the pool is
+/// replaced. `poolRevision` is exactly the signal for that, so the scan happens
+/// once per pool and an integer comparison happens per render instead.
+@MainActor
+private enum BoardPoolLookup {
+
+    /// The pool the cached answers belong to. Starts at a revision no database
+    /// can hold, so the first ask always fills the cache.
+    private static var revision = -1
+    private static var summonCard: Card?
+
+    /// The single physical Summon card, if the pool prints one.
+    static func summon(in database: CardDatabase) -> Card? {
+        if revision != database.poolRevision {
+            summonCard = database.cards.first { $0.type == .summon }
+            revision = database.poolRevision
+        }
+        return summonCard
+    }
+}
+
 // MARK: - Side
 
 /// Draws every zone belonging to one `PlayerSlot`.
@@ -137,6 +270,28 @@ struct BoardSideView: View {
     /// chosen from the mat itself.
     var onSelectSupport: (Int) -> Void = { _ in }
 
+    /// Hits to draw over this side's cards right now. The board hands both
+    /// sides the whole list and each picks out its own, so a single comparison
+    /// of the board before and after an action feeds both halves.
+    var flashes: [DamageFlash] = []
+
+    /// Reported once a floating number has finished playing, so the board can
+    /// drop it rather than leaving a spent animation mounted.
+    var onFlashFinished: (UUID) -> Void = { _ in }
+
+    /// Supports on this side that are turning face-up, or that the engine has
+    /// already taken out of their slot and the mat is still holding. The board
+    /// hands each half only its own, the way it does with `flashes`.
+    var reveals: [SupportReveal] = []
+
+    /// Reported once a reveal's hold is over, so the board can drop it and let
+    /// the slot go back to being the engine's — or empty.
+    var onRevealFinished: (UUID) -> Void = { _ in }
+
+    /// Points to device pixels, for working out how much of a printed
+    /// illustration the mat is actually able to show.
+    @Environment(\.displayScale) private var displayScale
+
     private var side: PlayerSide { engine.side(slot) }
 
     /// How far back anything that is not a legal target fades while a prompt
@@ -156,6 +311,35 @@ struct BoardSideView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
+        .task(id: engine.database.poolRevision) { warmArtwork() }
+    }
+
+    // MARK: Artwork
+
+    /// Decodes the pool's illustrations before the mat needs them.
+    ///
+    /// Every card face on the board is a decode the first time it is drawn, and
+    /// a decode of this artwork costs more than a whole frame — so a hand being
+    /// dealt, a body being summoned or a chakra being flipped all landed a
+    /// visible stall on the main thread at the exact moment something moved.
+    /// The store warms them on a utility queue instead, so the face finds a
+    /// decoded bitmap waiting for it.
+    ///
+    /// Both sizes the board draws are warmed: the mat's own slots, and the
+    /// larger faces the hand and the inspector bar put on the same screen.
+    /// Warming a bucket the screen never asks for would be wasted work, so the
+    /// sizes come from `CardFaceView` rather than being restated here. Both
+    /// sides call this and the store does the work once.
+    private func warmArtwork() {
+        let ids = engine.database.cards.map(\.id)
+        let store = engine.database.artStore
+
+        for size in [CardFaceSize.tiny, .small] {
+            store.prewarm(
+                cardIDs: ids,
+                maxPixelSize: CardFaceView.artPixelSize(for: size, displayScale: displayScale)
+            )
+        }
     }
 
     // MARK: Rows
@@ -226,6 +410,7 @@ struct BoardSideView: View {
 
     private func characterSlot(_ character: CharacterInPlay) -> some View {
         let card = engine.card(for: character)
+        let remaining = card.map { character.remainingHealth(of: $0) }
 
         return ZStack(alignment: .bottomTrailing) {
             Group {
@@ -247,9 +432,13 @@ struct BoardSideView: View {
             .rotationEffect(.degrees(character.isRested ? 90 : 0))
             .scaleEffect(character.isRested ? Metrics.cardAspect : 1)
             .animation(.easeOut(duration: 0.22), value: character.isRested)
+            // Red over the whole silhouette for the instant the hit lands, so
+            // a body taking damage is visible from across the mat rather than
+            // only in the figure that changed.
+            .damageFlash(for: remaining ?? 0, in: NotchedRectangle(notch: 4, corners: .diagonal))
 
-            if let card, character.damage > 0 {
-                healthBadge(character.remainingHealth(of: card))
+            if let remaining, card?.health != nil {
+                healthBadge(remaining, isRevealed: character.damage > 0)
             }
 
             if let card {
@@ -265,8 +454,19 @@ struct BoardSideView: View {
                     .padding(2)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
+
+            // Readiness and choosability never appear together — a side with a
+            // target being chosen on it publishes no ready marks — so the two
+            // badges share the corner without colliding.
+            targetMark(for: character)
+
+            floatingNumber(for: .character(character.id))
         }
         .frame(width: layout.slotWidth, height: layout.slotHeight)
+        // Published on the slot rather than on the face, so a rested body —
+        // turned on its side and scaled to the card ratio — is still aimed at
+        // where it sits rather than at where its untransformed face would be.
+        .projectileAnchor(.character(character.id))
         .contentShape(Rectangle())
         .onTapGesture { onSelectCharacter(character) }
         .onLongPressGesture { if let card { onRead(card) } }
@@ -288,32 +488,51 @@ struct BoardSideView: View {
 
     // MARK: Support slots
 
+    /// What one Support slot is currently drawing.
+    ///
+    /// A reveal outranks the engine's own slot, because it is the only thing
+    /// that can still draw a card the engine has already taken away.
+    private struct SupportContent {
+
+        let card: Card
+
+        /// The reveal playing over this slot, if one is.
+        let reveal: SupportReveal?
+
+        /// The card the engine still holds here. `nil` once it has resolved and
+        /// only the reveal is keeping it on the mat.
+        let placed: PlacedSupport?
+
+        /// Whether both players have seen this card. Drives the reader, the
+        /// spoken description and the printing itself.
+        var isPublic: Bool { reveal != nil || placed?.isRevealed == true }
+    }
+
     /// One numbered Support slot. `nil` keeps the empty treatment, so an
     /// unused zone still reads as a zone rather than as a gap in the mat.
     ///
-    /// A face-down card shows its back, because that is what it is: the answer
-    /// it holds is hidden until it is activated. It rings when the open window
-    /// could legally be answered with it — the engine's own list, so a
-    /// response-timing card stays dark in a summon window — and carries the
-    /// chakra printed on its SUPPORT bar so the price of answering is on the
-    /// mat rather than only in the response panel.
+    /// A face-down card is drawn by the rule in `FaceDownStyle`: your own is
+    /// its real printing behind a blur, because you may look at what you set,
+    /// and the opponent's is a back, because a blur is not a redaction. It
+    /// rings when the open window could legally be answered with it — the
+    /// engine's own list, so a response-timing card stays dark in a summon
+    /// window — and carries the chakra printed on its SUPPORT bar so the price
+    /// of answering is on the mat rather than only in the response panel.
     private func supportSlot(_ placed: PlacedSupport?, index: Int) -> some View {
         let number = index + 1
-        let entry: (placed: PlacedSupport, card: Card)? = placed.flatMap { held in
-            engine.card(for: held).map { (placed: held, card: $0) }
-        }
+        let content = supportContent(placed, index: index)
 
         return ZStack(alignment: .topLeading) {
             Group {
-                if let entry {
-                    supportFace(entry.placed, card: entry.card, index: index)
+                if let content {
+                    supportFace(content, index: index)
                 } else {
                     emptySlot(width: layout.slotWidth, label: "Support slot \(number), empty")
                 }
             }
             .frame(width: layout.slotWidth, height: layout.slotHeight)
 
-            slotNumber(number, isOccupied: entry != nil)
+            slotNumber(number, isOccupied: content != nil)
 
             if let cost = activationCost(at: index) {
                 activationCostBadge(cost)
@@ -323,47 +542,67 @@ struct BoardSideView: View {
         .contentShape(Rectangle())
         .onTapGesture { onSelectSupport(index) }
         .onLongPressGesture {
-            if let entry, canInspect(entry.placed) { onRead(entry.card) }
+            if let content, content.isPublic || isNear { onRead(content.card) }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityAddTraits(entry == nil ? [] : .isButton)
+        .accessibilityAddTraits(content == nil ? [] : .isButton)
         .accessibilityLabel(
-            entry.map { supportDescription($0.placed, card: $0.card, number: number) }
+            content.map { supportDescription($0, number: number) }
                 ?? "Support slot \(number), empty"
         )
     }
 
-    /// The card itself: a back while it is face-down, its printed face once
-    /// its activation has revealed it on the chain.
+    /// Works out which card a slot speaks for.
+    ///
+    /// The reveal wins while the slot is otherwise free, which is what keeps a
+    /// resolved Support on the mat for its beat and a half. It stands down the
+    /// moment the engine puts something else in the slot: a card set into the
+    /// freed space is the real occupant, and the reveal it displaced is stale.
+    private func supportContent(_ placed: PlacedSupport?, index: Int) -> SupportContent? {
+        if let reveal = reveals.first(where: { $0.slotIndex == index }),
+           placed == nil || placed?.id == reveal.supportID,
+           let card = engine.card(for: reveal.cardID) {
+            return SupportContent(card: card, reveal: reveal, placed: placed)
+        }
+        guard let placed, let card = engine.card(for: placed) else { return nil }
+        return SupportContent(card: card, reveal: nil, placed: placed)
+    }
+
+    /// The card itself, at whichever of the three states it is in: turning up,
+    /// already up, or still set.
     @ViewBuilder
-    private func supportFace(_ placed: PlacedSupport, card: Card, index: Int) -> some View {
-        if placed.isRevealed {
+    private func supportFace(_ content: SupportContent, index: Int) -> some View {
+        if let reveal = content.reveal {
+            RevealingSupportFace(
+                card: content.card,
+                width: layout.slotWidth,
+                highlight: supportTint(index),
+                startsClear: reveal.wasAlreadyUp,
+                onFinished: { onRevealFinished(reveal.id) }
+            )
+            .id(reveal.id)
+        } else if content.isPublic {
             BoardCardFace(
-                card: card,
+                card: content.card,
                 width: layout.slotWidth,
                 isDimmed: emphasis.isChoosing || emphasis.isTargetingAttack,
                 highlight: supportTint(index)
             )
         } else {
-            CardBackView(tint: supportTint(index) ?? Palette.accentMuted)
-                .frame(width: layout.slotWidth)
-                .overlay {
-                    if let tint = supportTint(index) {
-                        NotchedRectangle(notch: 4, corners: .diagonal)
-                            .stroke(tint, lineWidth: 2)
-                    }
-                }
+            // The information rule, and the one line in this file where getting
+            // it wrong would decide games: `.blurredKnown` may only ever be
+            // handed a card this viewer is entitled to see. `isNear` is the
+            // half drawn the right way up, which in every mode — including the
+            // hand-the-device-over solo game — is the half belonging to
+            // whoever is holding the phone.
+            BoardCardFace(
+                card: content.card,
+                width: layout.slotWidth,
+                isDimmed: emphasis.isChoosing || emphasis.isTargetingAttack,
+                highlight: supportTint(index),
+                faceDown: isNear ? .blurredKnown(reveal: 0) : .hidden
+            )
         }
-    }
-
-    /// Whether a long press should send this card to the reader.
-    ///
-    /// A player may check what they set — a face-down Support is hidden from
-    /// the other side of the table, not from its owner — but the opposing
-    /// side's backs stay backs. `isNear` is the half drawn the right way up,
-    /// which in every mode is the half belonging to whoever holds the device.
-    private func canInspect(_ placed: PlacedSupport) -> Bool {
-        placed.isRevealed || isNear
     }
 
     /// The ring a Support slot wears while it is one of the answers on offer.
@@ -414,13 +653,15 @@ struct BoardSideView: View {
         .accessibilityHidden(true)
     }
 
-    private func supportDescription(_ placed: PlacedSupport, card: Card, number: Int) -> String {
+    private func supportDescription(_ content: SupportContent, number: Int) -> String {
         var parts = ["Support slot \(number)"]
 
-        if placed.isRevealed {
-            parts.append("\(card.name), activated")
+        if content.reveal != nil {
+            parts.append("\(content.card.name), activating")
+        } else if content.isPublic {
+            parts.append("\(content.card.name), activated")
         } else {
-            parts.append(isNear ? "your face-down \(card.name)" : "a face-down card")
+            parts.append(isNear ? "your face-down \(content.card.name)" : "a face-down card")
         }
 
         if emphasis.answerableSupports.contains(number - 1) {
@@ -457,7 +698,7 @@ struct BoardSideView: View {
     /// how the mat says "the summon is spent" without a word.
     @ViewBuilder
     private var summonSlot: some View {
-        if let card = engine.database.cards.first(where: { $0.type == .summon }) {
+        if let card = BoardPoolLookup.summon(in: engine.database) {
             BoardCardFace(
                 card: card,
                 width: layout.slotWidth,
@@ -535,7 +776,14 @@ struct BoardSideView: View {
                     leaderReadyMark
                         .padding(2)
                 }
+
+                leaderTargetMark
+
+                floatingNumber(for: .leader(slot))
             }
+            // Leaders attack and are attacked like anything else on the mat,
+            // so the Leader publishes an endpoint exactly as a body does.
+            .projectileAnchor(.leader(slot))
             .contentShape(Rectangle())
             .onTapGesture { onSelectLeader() }
             .onLongPressGesture { onRead(leader) }
@@ -556,20 +804,22 @@ struct BoardSideView: View {
             return !(emphasis.leaderIsChoiceTarget || emphasis.leaderIsStaged)
         }
         if emphasis.isTargetingAttack {
-            return !emphasis.leaderIsAttackTarget
+            // The armed Leader is on the attacking side, where nothing is a
+            // target — it stays lit anyway, so the player can see what they
+            // chose to swing with.
+            return !(emphasis.leaderIsAttackTarget || emphasis.leaderIsSelectedAttacker)
         }
         return false
     }
 
-    /// A staged or armed ring beats an option ring, an option ring beats a
-    /// target ring, and readiness comes last — the more committed a decision
-    /// is, the louder it draws.
+    /// The same order a body's ring follows: anything choosable wears the
+    /// accent, and readiness comes last.
     private var leaderHighlight: Color? {
         if emphasis.leaderIsStaged { return Palette.accent }
-        if emphasis.leaderIsChoiceTarget { return Palette.warning }
+        if emphasis.leaderIsChoiceTarget { return Palette.accent }
         if emphasis.leaderIsSelectedAttacker { return Palette.accent }
         if emphasis.isChoosing { return nil }
-        if emphasis.leaderIsAttackTarget { return Palette.negative }
+        if emphasis.leaderIsAttackTarget { return Palette.accent }
         if emphasis.leaderMayAttack { return Palette.accentMuted }
         if emphasis.leaderAbilityReady { return Palette.accent }
         return nil
@@ -709,17 +959,50 @@ struct BoardSideView: View {
 
     // MARK: Badges
 
-    /// Remaining health after this turn's battle damage. Damage heals at end
-    /// of turn, so the badge only ever appears mid-turn.
-    private func healthBadge(_ remaining: Int) -> some View {
-        Text("\(remaining)")
-            .font(Typeface.numeric(9, weight: .bold))
-            .foregroundStyle(Palette.textOnAccent)
+    /// Remaining health after this turn's battle damage.
+    ///
+    /// Damage heals at end of turn, so the readout is only ever *shown*
+    /// mid-turn — but it is mounted the whole time and hidden with opacity
+    /// rather than being added when the first hit lands. `HealthCounterView`
+    /// counts from wherever it already was, so a readout that only appears
+    /// once the damage is done would have nothing to count down from and
+    /// would snap to the new figure, which is the exact thing it exists to
+    /// avoid.
+    ///
+    /// It sits on the surface colour rather than on red, because the counter
+    /// draws its own red flash and prints its figure in the primary text
+    /// colour — which on a red pill is unreadable in the light appearance.
+    private func healthBadge(_ remaining: Int, isRevealed: Bool) -> some View {
+        HealthCounterView(value: remaining, size: layout.slotWidth < 52 ? 9 : 11)
             .padding(.horizontal, 3)
             .padding(.vertical, 1)
-            .background(Palette.negative, in: RoundedRectangle(cornerRadius: 3))
+            .background(Palette.surface.opacity(0.95), in: RoundedRectangle(cornerRadius: 3))
+            .overlay {
+                RoundedRectangle(cornerRadius: 3)
+                    .stroke(Palette.negative, lineWidth: 1)
+            }
             .padding(2)
+            .opacity(isRevealed ? 1 : 0)
             .accessibilityHidden(true)
+    }
+
+    /// The floating combat number thrown off a card that was just hit.
+    ///
+    /// Scaled off the slot rather than fixed, so a phone-sized mat does not
+    /// wear a figure wider than the card it belongs to.
+    @ViewBuilder
+    private func floatingNumber(for target: DamageFlash.Target) -> some View {
+        if let flash = flashes.first(where: { $0.target == target }) {
+            DamageNumberView(
+                amount: flash.amount,
+                kind: flash.kind,
+                size: max(13, layout.slotWidth * 0.4),
+                onFinished: { onFlashFinished(flash.id) }
+            )
+            .id(flash.id)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .allowsHitTesting(false)
+        }
     }
 
     /// Arrived this turn without Rush, so it cannot attack yet.
@@ -856,18 +1139,61 @@ struct BoardSideView: View {
 
     // MARK: Highlights
 
-    /// The ring a body wears, from most to least committed: staged for the
-    /// open prompt, an option for it, the armed attacker, a legal attack
-    /// target, ready to attack, ready to activate.
+    /// The ring a body wears.
+    ///
+    /// Everything the player may tap right now wears the accent, whichever
+    /// question is being asked: an option for the open prompt, one already
+    /// staged for it, the armed attacker, a legal attack target. One colour
+    /// means "this is choosable", and there is no second colour for the player
+    /// to learn — the difference between the states is carried by
+    /// `targetMark`, which a colour-blind player can read and a ring cannot.
+    ///
+    /// Readiness — a body that could attack, a box that could be activated —
+    /// is a quieter thing and keeps its own muted treatment, and is never
+    /// published while a target is being chosen anyway.
     private func highlight(for character: CharacterInPlay) -> Color? {
         if emphasis.stagedTargets.contains(character.id) { return Palette.accent }
-        if emphasis.choiceTargets.contains(character.id) { return Palette.warning }
+        if emphasis.choiceTargets.contains(character.id) { return Palette.accent }
         if emphasis.selectedAttackerID == character.id { return Palette.accent }
         if emphasis.isChoosing { return nil }
-        if emphasis.attackTargets.contains(character.id) { return Palette.negative }
+        if emphasis.attackTargets.contains(character.id) { return Palette.accent }
         if emphasis.attackers.contains(character.id) { return Palette.accentMuted }
         if emphasis.readyAbilities.contains(character.id) { return Palette.accent }
         return nil
+    }
+
+    /// The badge on a card the board is waiting for a tap on: a crosshair on
+    /// something choosable, a check on something already chosen.
+    @ViewBuilder
+    private func targetMark(for character: CharacterInPlay) -> some View {
+        if emphasis.stagedTargets.contains(character.id) {
+            pickMark(symbol: "checkmark", tint: Palette.positive)
+        } else if emphasis.choiceTargets.contains(character.id)
+                    || emphasis.attackTargets.contains(character.id) {
+            pickMark(symbol: "scope", tint: Palette.accent)
+        }
+    }
+
+    /// The same badge for the Leader, which is an option and a target as often
+    /// as a body is.
+    @ViewBuilder
+    private var leaderTargetMark: some View {
+        if emphasis.leaderIsStaged {
+            pickMark(symbol: "checkmark", tint: Palette.positive)
+        } else if emphasis.leaderIsChoiceTarget || emphasis.leaderIsAttackTarget {
+            pickMark(symbol: "scope", tint: Palette.accent)
+        }
+    }
+
+    private func pickMark(symbol: String, tint: Color) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 8, weight: .black))
+            .foregroundStyle(Palette.textOnAccent)
+            .padding(3)
+            .background(tint, in: Circle())
+            .padding(2)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .accessibilityHidden(true)
     }
 
     /// Anything the open question cannot legally be pointed at steps back, so
@@ -928,6 +1254,71 @@ struct BoardSideView: View {
             parts.append("ability used this turn")
         }
         return parts.joined(separator: ", ")
+    }
+}
+
+// MARK: - Revealing support
+
+/// A Support coming into focus in its slot, and staying there for a beat after
+/// the engine has finished with it.
+///
+/// It owns the turn and the hold rather than the board, for the same reason
+/// `DamageNumberView` owns its own animation: SwiftUI interpolates a value that
+/// changes *after* a view is installed, and a board that set the reveal to 1 in
+/// the same pass that added the card would get a cut instead of a focus pull.
+/// `onAppear` is the first moment there is something to animate from.
+///
+/// It reports back when the hold is over. The board then drops the reveal and
+/// the slot goes back to being the engine's — which, by then, usually means
+/// empty. Under Reduce Motion the card simply arrives readable; the hold is a
+/// pause rather than a movement, so it is kept.
+///
+/// `startsClear` covers the second of the two holds a card can be given: one
+/// that was already face-up on the mat is only being kept there a moment
+/// longer, so it is drawn as the plain printing with no turn at all.
+private struct RevealingSupportFace: View {
+
+    let card: Card
+
+    /// The slot width. The face works its own height out from the card ratio.
+    let width: CGFloat
+
+    /// The ring the slot is wearing, if the open window can be answered here.
+    let highlight: Color?
+
+    /// True when the card was already face-up before this hold began.
+    let startsClear: Bool
+
+    let onFinished: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// 0 is the card as it was set, 1 the clear printing.
+    @State private var reveal: Double = 0
+
+    var body: some View {
+        BoardCardFace(
+            card: card,
+            width: width,
+            highlight: highlight,
+            faceDown: startsClear ? nil : .blurredKnown(reveal: reveal)
+        )
+        .onAppear {
+            guard !startsClear else { return }
+            guard !reduceMotion else {
+                reveal = 1
+                return
+            }
+            withAnimation(.easeOut(duration: SupportReveal.turn)) { reveal = 1 }
+        }
+        .task {
+            try? await Task.sleep(for: SupportReveal.hold)
+            // A cancelled sleep means the board tore the slot down itself —
+            // a new game, a card set into the slot — so there is nothing to
+            // report back to it.
+            guard !Task.isCancelled else { return }
+            onFinished()
+        }
     }
 }
 
@@ -1001,6 +1392,149 @@ struct BoardSideView: View {
         onRead: { _ in },
         onSelectCharacter: { _ in },
         onSelectLeader: {}
+    )
+    .padding()
+    .background(Palette.backdrop)
+    .environment(database)
+}
+
+/// A prompt choosing from the mat: every offered card lit and marked, one of
+/// them staged, and everything else pushed back.
+#Preview("Choosing a target") {
+    let database = CardDatabase()
+    let engine = BoardPreview.engine(database: database)
+    let bodies = engine.side(.player).characters.map(\.id)
+
+    BoardSideView(
+        slot: .player,
+        title: "P1",
+        isNear: true,
+        isActive: true,
+        layout: BoardPreview.wideLayout,
+        engine: engine,
+        emphasis: BoardEmphasis(
+            isChoosing: true,
+            choiceTargets: Set(bodies.dropFirst()),
+            leaderIsChoiceTarget: true,
+            stagedTargets: Set(bodies.prefix(1))
+        ),
+        chakraFace: database.chakraCards.first,
+        onRead: { _ in },
+        onSelectCharacter: { _ in },
+        onSelectLeader: {}
+    )
+    .padding()
+    .background(Palette.backdrop)
+    .environment(database)
+}
+
+/// Damage landing: a floating number over the body that was hit and over the
+/// Leader that lost life, with the health readout counting down under it.
+#Preview("Damage landing") {
+    let database = CardDatabase()
+    let engine = BoardPreview.engine(database: database)
+
+    BoardSideView(
+        slot: .player,
+        title: "P1",
+        isNear: true,
+        isActive: false,
+        layout: BoardPreview.wideLayout,
+        engine: engine,
+        emphasis: BoardEmphasis(),
+        chakraFace: database.chakraCards.first,
+        onRead: { _ in },
+        onSelectCharacter: { _ in },
+        onSelectLeader: {},
+        flashes: engine.side(.player).characters.first.map {
+            [
+                DamageFlash(target: .character($0.id), amount: 3, kind: .damage),
+                DamageFlash(target: .leader(.player), amount: 2, kind: .damage)
+            ]
+        } ?? [DamageFlash(target: .leader(.player), amount: 2, kind: .damage)]
+    )
+    .padding()
+    .background(Palette.backdrop)
+    .environment(database)
+}
+
+/// The information rule, on the mat: the same set Support, from both sides of
+/// the table. The owner sees the printing behind a blur, because they may look
+/// at what they set. The other player sees a back — a blur would be no
+/// redaction at all when thirty-five printings are told apart by colour and
+/// silhouette alone.
+#Preview("Face-down: mine, then theirs") {
+    let database = CardDatabase()
+    let board = BoardPreview.engineWithASetSupport(database: database)
+
+    return VStack(alignment: .leading, spacing: Metrics.spacingM) {
+        Text("The owner's half").sectionLabel()
+        BoardSideView(
+            slot: board.slot,
+            title: "P1",
+            isNear: true,
+            isActive: true,
+            layout: BoardPreview.wideLayout,
+            engine: board.engine,
+            emphasis: BoardEmphasis(),
+            chakraFace: database.chakraCards.first,
+            onRead: { _ in },
+            onSelectCharacter: { _ in },
+            onSelectLeader: {}
+        )
+
+        Text("The other side of the table").sectionLabel()
+        BoardSideView(
+            slot: board.slot,
+            title: "P2",
+            isNear: false,
+            isActive: false,
+            layout: BoardPreview.wideLayout,
+            engine: board.engine,
+            emphasis: BoardEmphasis(),
+            chakraFace: database.chakraCards.first,
+            onRead: { _ in },
+            onSelectCharacter: { _ in },
+            onSelectLeader: {}
+        )
+    }
+    .padding()
+    .background(Palette.backdrop)
+    .environment(database)
+}
+
+/// A Support activating: the card comes into focus in its slot and stays there
+/// for a beat and a half, whether or not the engine has already emptied the
+/// slot underneath it.
+#Preview("A support activating") {
+    let database = CardDatabase()
+    let board = BoardPreview.engineWithASetSupport(database: database)
+    let set = board.engine.side(board.slot).supports
+        .enumerated()
+        .compactMap { index, placed in placed.map { (index: index, placed: $0) } }
+        .first
+
+    return BoardSideView(
+        slot: board.slot,
+        title: "P1",
+        isNear: true,
+        isActive: true,
+        layout: BoardPreview.wideLayout,
+        engine: board.engine,
+        emphasis: BoardEmphasis(),
+        chakraFace: database.chakraCards.first,
+        onRead: { _ in },
+        onSelectCharacter: { _ in },
+        onSelectLeader: {},
+        reveals: set.map {
+            [SupportReveal(
+                supportID: $0.placed.id,
+                slot: board.slot,
+                slotIndex: $0.index,
+                cardID: $0.placed.cardID,
+                wasAlreadyUp: false
+            )]
+        } ?? []
     )
     .padding()
     .background(Palette.backdrop)

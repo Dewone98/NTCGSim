@@ -6,6 +6,11 @@
 //  deck the player built. The chosen mode is carried through to the Vanilla
 //  route because it decides who holds the second deck.
 //
+//  It is also the last screen before a game against the computer, which is why
+//  the AI difficulty is offered here as well as in Settings: the strength of
+//  the opponent is a decision about the game you are about to play, and burying
+//  it behind the menu means it is only ever found after losing to kage.
+//
 
 import SwiftUI
 
@@ -18,11 +23,14 @@ struct FormatChoiceView: View {
 
     @Environment(Router.self) private var router
     @Environment(CardDatabase.self) private var database
+    @Environment(SettingsStore.self) private var settings
 
     /// Wide enough for a `.small` card face to stay readable beside the copy.
     private static let thumbnailWidth = Metrics.controlHeight * 1.4
 
     var body: some View {
+        @Bindable var settings = settings
+
         ScreenScaffold(
             title: mode.title,
             subtitle: mode.detail,
@@ -30,6 +38,10 @@ struct FormatChoiceView: View {
         ) {
             ScrollView {
                 VStack(alignment: .leading, spacing: Metrics.spacingM) {
+                    if mode == .versusAI {
+                        difficultyPanel(selection: $settings.aiDifficulty)
+                    }
+
                     Text("Format").sectionLabel()
 
                     ForEach(GameFormat.allCases, id: \.self) { format in
@@ -40,6 +52,45 @@ struct FormatChoiceView: View {
             }
             .scrollIndicators(.hidden)
         }
+    }
+
+    // MARK: Difficulty
+
+    /// The opponent's strength, shown as it stands and changeable in place.
+    ///
+    /// It is seeded from the saved setting and writes straight back to it
+    /// rather than being carried in `GameConfiguration`, so there is exactly
+    /// one answer to "how hard is the AI" — the board reads the same setting.
+    /// Only Classic and Vanilla against the computer see it; Solo v Self has no
+    /// opponent to tune.
+    private func difficultyPanel(selection: Binding<AIDifficulty>) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+            Text("AI difficulty").sectionLabel()
+
+            // Horizontally scrollable so four chips still fit on a 393pt phone
+            // once the type scales up, rather than being squeezed or clipped.
+            ScrollView(.horizontal, showsIndicators: false) {
+                OptionPicker(
+                    options: AIDifficulty.allCases.map { (value: $0, title: $0.title) },
+                    selection: selection
+                )
+                .padding(.vertical, Metrics.spacingXS)
+            }
+
+            Text(selection.wrappedValue.detail)
+                .font(Typeface.body(14))
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("This is the same setting the Settings screen holds, so it stays "
+                 + "chosen for your next game too.")
+                .font(Typeface.body(12))
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Metrics.spacingM)
+        .notchedPanel()
     }
 
     // MARK: Panels
@@ -118,12 +169,22 @@ struct FormatChoiceView: View {
     }
 }
 
-// MARK: - Preview
+// MARK: - Previews
 
-#Preview {
+#Preview("Against the AI") {
     NavigationStack {
         FormatChoiceView(mode: .versusAI)
     }
     .environment(Router())
     .environment(CardDatabase())
+    .environment(SettingsStore())
+}
+
+#Preview("Solo — no difficulty panel") {
+    NavigationStack {
+        FormatChoiceView(mode: .soloVersusSelf)
+    }
+    .environment(Router())
+    .environment(CardDatabase())
+    .environment(SettingsStore())
 }

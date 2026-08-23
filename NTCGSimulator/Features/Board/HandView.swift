@@ -62,6 +62,18 @@ struct HandView: View {
     /// hand this is.
     let emptyMessage: String
 
+    /// Hand positions the open prompt offers, for a prompt answered from the
+    /// hand rather than from the mat — the Leader's put-back is the pool's.
+    ///
+    /// `nil` means no prompt is choosing here and the strip behaves normally.
+    /// Non-nil puts the strip into the same treatment the mat uses: the offered
+    /// cards light up and everything else steps back, so a legal answer is
+    /// always the lit thing wherever it happens to be sitting.
+    var choiceTargets: Set<Int>? = nil
+
+    /// Hand positions already staged for a prompt that takes several.
+    var stagedTargets: Set<Int> = []
+
     /// A tap: open the card's action panel.
     let onPlay: (HandCard) -> Void
 
@@ -104,30 +116,81 @@ struct HandView: View {
 
     private func face(for handCard: HandCard) -> some View {
         let isSelected = handCard.id == selectedIndex
-        let isDimmed = !isInteractive || !handCard.isPlayable
+        let isChoosing = choiceTargets != nil
+        let isTarget = choiceTargets?.contains(handCard.id) ?? false
+        let isStaged = stagedTargets.contains(handCard.id)
+
+        // A prompt outranks playability: while one is open the only question
+        // being asked of the hand is which card answers it.
+        let isDimmed = isChoosing
+            ? !(isTarget || isStaged)
+            : (!isInteractive || !handCard.isPlayable)
 
         return BoardCardFace(
             card: handCard.card,
             size: .small,
             width: cardWidth,
             isDimmed: isDimmed,
-            highlight: isSelected ? Palette.accent : nil
+            highlight: highlight(isChoosing: isChoosing,
+                                 isTarget: isTarget,
+                                 isStaged: isStaged,
+                                 isSelected: isSelected)
         )
         .overlay(alignment: .top) {
-            PlayModeBar(handCard: handCard, width: cardWidth)
-                .opacity(isDimmed ? dimmedOpacity : 1)
-                .allowsHitTesting(false)
+            // The three play modes answer a question nobody is asking while a
+            // prompt is open, so the bar leaves rather than greying out.
+            if !isChoosing {
+                PlayModeBar(handCard: handCard, width: cardWidth)
+                    .opacity(isDimmed ? dimmedOpacity : 1)
+                    .allowsHitTesting(false)
+            }
         }
-        .offset(y: isSelected ? -lift : 0)
+        .overlay(alignment: .topTrailing) {
+            targetMark(isTarget: isTarget, isStaged: isStaged)
+        }
+        .offset(y: isSelected || isStaged ? -lift : 0)
         .animation(.spring(response: 0.28, dampingFraction: 0.8), value: isSelected)
+        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: isStaged)
         .contentShape(Rectangle())
         .onTapGesture { onPlay(handCard) }
         .onLongPressGesture { onRead(handCard) }
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(label(for: handCard))
-        .accessibilityHint(hint(for: handCard))
+        .accessibilityLabel(label(for: handCard, isTarget: isTarget, isStaged: isStaged))
+        .accessibilityHint(hint(for: handCard, isChoosing: isChoosing))
         .accessibilityAction(named: Text("Read this card")) { onRead(handCard) }
+    }
+
+    /// The ring, in the same order of commitment the mat uses: staged beats
+    /// offered, offered beats the reader's own selection, and a card the open
+    /// prompt does not offer wears nothing at all.
+    ///
+    /// One accent for everything the player may tap, exactly as on the mat —
+    /// the badge is what separates chosen from choosable.
+    private func highlight(
+        isChoosing: Bool,
+        isTarget: Bool,
+        isStaged: Bool,
+        isSelected: Bool
+    ) -> Color? {
+        if isStaged || isTarget { return Palette.accent }
+        if isChoosing { return nil }
+        return isSelected ? Palette.accent : nil
+    }
+
+    /// The badge the mat puts on a choosable card, repeated here so the hand
+    /// and the board read the same during a prompt.
+    @ViewBuilder
+    private func targetMark(isTarget: Bool, isStaged: Bool) -> some View {
+        if isStaged || isTarget {
+            Image(systemName: isStaged ? "checkmark" : "scope")
+                .font(.system(size: 9, weight: .black))
+                .foregroundStyle(Palette.textOnAccent)
+                .padding(3.5)
+                .background(isStaged ? Palette.positive : Palette.accent, in: Circle())
+                .padding(3)
+                .accessibilityHidden(true)
+        }
     }
 
     private var emptyState: some View {
@@ -138,11 +201,25 @@ struct HandView: View {
             .notchedPanel(notch: 8, fill: Palette.panel.opacity(0.5), stroke: Palette.border)
     }
 
-    private func label(for handCard: HandCard) -> String {
+    private func label(for handCard: HandCard, isTarget: Bool, isStaged: Bool) -> String {
         let card = handCard.card
         var parts = [card.name, card.type.title]
         if let power = card.power { parts.append("power \(power)") }
         if let health = card.health { parts.append("health \(health)") }
+
+        // While a prompt is choosing from the hand, what the card could
+        // otherwise be played as is not on offer and reading it out is noise.
+        guard choiceTargets == nil else {
+            if isStaged {
+                parts.append("staged for the open prompt")
+            } else if isTarget {
+                parts.append("an option for the open prompt")
+            } else {
+                parts.append("not an option for the open prompt")
+            }
+            return parts.joined(separator: ", ")
+        }
+
         parts.append(contentsOf: handCard.offeredOptions.map(spoken))
         return parts.joined(separator: ", ")
     }
@@ -156,8 +233,9 @@ struct HandView: View {
         return "\(option.title), unavailable, \(refusal)"
     }
 
-    private func hint(for handCard: HandCard) -> String {
-        handCard.isPlayable
+    private func hint(for handCard: HandCard, isChoosing: Bool) -> String {
+        if isChoosing { return "Double tap to answer the open prompt with it" }
+        return handCard.isPlayable
             ? "Double tap to choose how to play it"
             : "Double tap to see why it cannot be played"
     }
@@ -260,6 +338,12 @@ private struct PlayModeBar: View {
 ///
 /// SET AS SUPPORT appears only for a card printing a SUPPORT bar — see
 /// `HandCard.offeredOptions`.
+///
+/// The second question `SettingsStore.confirmJutsuSummon` asks for is asked
+/// inside the panel, under the row it belongs to, rather than through a system
+/// dialog. A dialog takes the player out of the game to answer a question about
+/// a card it then hides, and it cannot show the price or the printed text the
+/// answer depends on — the row can, because the row is already showing them.
 struct HandActionPanel: View {
 
     let handCard: HandCard
@@ -281,6 +365,8 @@ struct HandActionPanel: View {
 
     /// The mode waiting on its second press.
     @State private var pending: PlayOption?
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack {
@@ -306,20 +392,6 @@ struct HandActionPanel: View {
                 WideButton(title: "Cancel", style: .primary, action: onDismiss)
             }
             .padding(Metrics.spacingL)
-        }
-        .confirmationDialog(
-            confirmationTitle,
-            isPresented: confirmationBinding,
-            titleVisibility: .visible,
-            presenting: pending
-        ) { option in
-            Button(option.title) {
-                pending = nil
-                onChoose(option)
-            }
-            Button("Cancel", role: .cancel) { pending = nil }
-        } message: { option in
-            Text(confirmationMessage(for: option))
         }
     }
 
@@ -362,16 +434,33 @@ struct HandActionPanel: View {
 
     // MARK: Rows
 
+    /// One mode, with its confirmation strip underneath when the player has
+    /// asked to be asked twice.
+    private func row(_ option: PlayOption) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+            modeButton(option)
+                // The other modes step back while one is waiting on its second
+                // press, so the panel has one live question at a time.
+                .opacity(pending == nil || pending?.id == option.id ? 1 : 0.4)
+
+            if pending?.id == option.id {
+                confirmStrip(option)
+            }
+        }
+    }
+
     /// One mode. A refused row stays readable and keeps its price: a player who
     /// can see what a mode would have cost can plan the turn that unlocks it.
-    private func row(_ option: PlayOption) -> some View {
+    private func modeButton(_ option: PlayOption) -> some View {
         Button {
             guard option.isAllowed else { return }
             guard asksToConfirm else {
                 onChoose(option)
                 return
             }
-            pending = option
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+                pending = option
+            }
         } label: {
             VStack(alignment: .leading, spacing: Metrics.spacingXS) {
                 HStack(alignment: .firstTextBaseline, spacing: Metrics.spacingS) {
@@ -441,17 +530,42 @@ struct HandActionPanel: View {
 
     // MARK: Confirmation
 
-    private var confirmationBinding: Binding<Bool> {
-        Binding(
-            get: { pending != nil },
-            set: { if !$0 { pending = nil } }
-        )
+    /// The second press, asked where the first one was made.
+    ///
+    /// It repeats the price rather than only the verb, because the price is
+    /// what the question is actually about: "Activate Chidori" is not a
+    /// decision until the two chakra it charges are beside it.
+    private func confirmStrip(_ option: PlayOption) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+            Text(confirmationMessage(for: option))
+                .font(Typeface.body(12))
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: Metrics.spacingS) {
+                WideButton(title: "Confirm", style: .primary) {
+                    let chosen = option
+                    pending = nil
+                    onChoose(chosen)
+                }
+                WideButton(title: "Not yet") {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+                        pending = nil
+                    }
+                }
+            }
+        }
+        .padding(Metrics.spacingM)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .notchedPanel(notch: 8, fill: Palette.panelActive, stroke: Palette.accent)
+        .transition(.opacity)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Confirm \(option.title)")
     }
 
-    private var confirmationTitle: String { handCard.card.name }
-
     private func confirmationMessage(for option: PlayOption) -> String {
-        "\(option.title) — \(price(option).lowercased()).\n\n\(detail(option))"
+        "\(handCard.card.name) — \(option.title.lowercased()), \(price(option).lowercased()). \(detail(option))"
     }
 }
 
@@ -511,6 +625,30 @@ struct HandActionPanel: View {
     .environment(database)
 }
 
+/// A prompt answered from the hand — the Leader's put-back. Two positions are
+/// offered, one of them already staged, and everything else steps back.
+#Preview("Choosing from the hand") {
+    let database = CardDatabase()
+    let engine = BoardPreview.engine(database: database)
+    let cards = engine.handCards(for: .player)
+
+    HandView(
+        cards: cards,
+        cardWidth: 74,
+        selectedIndex: nil,
+        isInteractive: false,
+        emptyMessage: "Your hand is empty.",
+        choiceTargets: Set(cards.prefix(3).map(\.id)),
+        stagedTargets: cards.first.map { [$0.id] } ?? [],
+        onPlay: { _ in },
+        onRead: { _ in }
+    )
+    .frame(height: 120)
+    .padding()
+    .background(Palette.backdrop)
+    .environment(database)
+}
+
 #Preview("Action panel") {
     let database = CardDatabase()
     let card = database.cards.first(where: \.canSetAsSupport) ?? database.cards[0]
@@ -527,6 +665,22 @@ struct HandActionPanel: View {
         ),
         availableChakra: 2,
         asksToConfirm: false,
+        onChoose: { _ in },
+        onDismiss: {}
+    )
+    .environment(database)
+}
+
+/// The panel with the second question turned on. Pressing a mode opens the
+/// confirmation under the row it belongs to instead of over the whole app.
+#Preview("Action panel, confirming") {
+    let database = CardDatabase()
+    let card = database.cards.first(where: \.canSetAsSupport) ?? database.cards[0]
+
+    HandActionPanel(
+        handCard: HandCard(id: 0, card: card, options: BoardPreview.options(for: card)),
+        availableChakra: 3,
+        asksToConfirm: true,
         onChoose: { _ in },
         onDismiss: {}
     )

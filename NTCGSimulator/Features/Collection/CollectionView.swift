@@ -17,6 +17,9 @@ struct CollectionView: View {
     @Environment(CardDatabase.self) private var database
     @Environment(Router.self) private var router
 
+    /// Points to device pixels, for sizing the artwork the grid warms.
+    @Environment(\.displayScale) private var displayScale
+
     /// Matched against name, collector number and effect text by the database.
     @State private var searchText = ""
 
@@ -82,7 +85,24 @@ struct CollectionView: View {
                 .scrollDismissesKeyboard(.immediately)
             }
             .task(id: searchText) { await debounceSearch() }
+            .task(id: database.poolRevision) { warmArtwork() }
         }
+    }
+
+    /// Decodes the pool's illustrations before the grid scrolls onto them.
+    ///
+    /// The grid is lazy, so a card is only built when it is about to appear —
+    /// which is precisely the wrong moment to decode its artwork, because that
+    /// decode happens inside `body`, on the main thread, and costs more than
+    /// the frame it lands in. Scrolling a row into view meant three of them at
+    /// once. Warming the whole pool on a utility queue turns every one of those
+    /// into a cache hit; thirty-five cards is a bounded, one-off cost, and an
+    /// imported pool re-warms because `poolRevision` moves.
+    private func warmArtwork() {
+        database.artStore.prewarm(
+            cardIDs: database.cards.map(\.id),
+            maxPixelSize: CardFaceView.artPixelSize(for: .small, displayScale: displayScale)
+        )
     }
 
     /// Lets a burst of keystrokes settle before refiltering. Cancelled and

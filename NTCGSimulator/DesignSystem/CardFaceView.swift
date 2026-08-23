@@ -2,85 +2,75 @@
 //  CardFaceView.swift
 //  NTCGSimulator
 //
-//  Draws a card, from one of two sources that must never be mixed.
+//  Draws a card: its printed artwork, and nothing else.
 //
-//  Imported artwork is the printed card: the damage banner, the power and
-//  health cells, the name bar, the trait line and the type are already in the
-//  picture. So an installed illustration is shown edge to edge with nothing
-//  drawn over it — anything we added would print every number twice, in the
-//  wrong place. Only a card with no artwork gets a face built from its own
-//  values, and that face is laid out where the printed card puts things, so the
-//  two kinds read the same way side by side in a hand.
+//  Every card in the set ships with its illustration inside the app bundle, and
+//  the printing already carries the damage banner, the power and health cells,
+//  the name bar, the trait line and the type. So a face is that picture, edge
+//  to edge, with nothing drawn over it — anything this view added would print
+//  every number twice, in the wrong place. The only marks it makes of its own
+//  are the selection ring and the dimming, neither of which is printed on
+//  anything.
 //
-//  The generated illustration is art direction rather than a stand-in: a colour
-//  identity ground and a motif picked by card type, shaped by a seed hashed out
-//  of the collector number. It rasterises once through `drawingGroup()`, drops
-//  most of its elements at board sizes and caches its recipe, because a
-//  collection grid redraws every face it scrolls past.
+//  There used to be a second source here: a procedural illustration for cards
+//  with no file, complete with its own drawn banner and name bar. It is gone.
+//  `BundledCardArtTests` fails the build if any card in the pool lacks
+//  artwork, so a missing file is a bug and nothing else — and the placeholder
+//  below is drawn to look like one. Inventing a picture in its place hid the
+//  fault behind something a player would read as a card.
+//
+//  The one place a face has to be careful is a card lying face down, because
+//  what it may show depends on who is looking. That rule is set out in
+//  `FaceDownStyle`, and a caller has to name the case it wants.
 //
 
 import Foundation
 import SwiftUI
 
+// MARK: - Face-down treatment
+
+/// How a card lying face down is drawn — and, more to the point, how much of
+/// its printing the viewer is entitled to see.
+///
+/// The distinction is an information rule, not a visual preference. A player
+/// may look at their own set Supports whenever they like, so drawing one as its
+/// real illustration under a blur is honest: it reads as a real card turned
+/// over, and its activation is the same picture coming back into focus. An
+/// opponent's set Support and every card in an opponent's hand are secret, and
+/// a blur is not a redaction — thirty-five printings are told apart at a glance
+/// by colour and silhouette alone, so a blurred opponent card gives the game
+/// away as surely as a clear one would.
+///
+/// The two are therefore cases a caller has to name, and the one that costs
+/// nothing to write is the safe one: `.hidden` takes no argument, while showing
+/// a real printing means spelling out both `blurredKnown` and how far the card
+/// has been turned back up.
+enum FaceDownStyle: Equatable {
+
+    /// An opaque back. Nothing of the printing survives it — the case for an
+    /// opponent's set Supports, an opponent's hand, and the decks.
+    case hidden
+
+    /// The card's own illustration, blurred. Only ever for a card this viewer
+    /// already knows: their own set Supports.
+    ///
+    /// `reveal` runs from 0, fully turned over, to 1, the clear printing. It is
+    /// interpolated rather than switched, so a Support activating on the chain
+    /// comes into focus inside the caller's own `withAnimation` instead of
+    /// snapping.
+    case blurredKnown(reveal: Double)
+}
+
 // MARK: - Size
 
-/// How much chrome a card face shows. Small sizes drop text that would be
-/// unreadable anyway; `.tiny` keeps only the printed numbers, which is all that
-/// survives a 44pt-wide board slot.
+/// How large a card face is drawn. The size decides how much artwork is worth
+/// decoding, how hard a turned card has to be blurred to read as turned, and
+/// how much lettering the missing-art panel has room for.
 enum CardFaceSize {
     case tiny     // board slots and deck-list rows
     case small    // hand, collection grid
     case medium   // deck builder
     case large    // full-card inspector
-
-    var showsEffectText: Bool { self == .large }
-    var showsTraits: Bool { self == .medium || self == .large }
-    var showsName: Bool { self != .tiny }
-
-    /// The type line, the rarity mark, the keylines and the ability badge —
-    /// everything that needs more room than a board slot has.
-    var showsChrome: Bool { self != .tiny }
-
-    /// "DMG", "POW", "HP" above their figures. A board slot has room for the
-    /// number or the word, never both, and the number is the one that matters.
-    var showsStatLabels: Bool { self != .tiny }
-
-    var nameSize: CGFloat {
-        switch self {
-        case .tiny: return 6
-        case .small: return 9.5
-        case .medium: return 12
-        case .large: return 19
-        }
-    }
-
-    var statSize: CGFloat {
-        switch self {
-        case .tiny: return 8
-        case .small: return 11
-        case .medium: return 14
-        case .large: return 22
-        }
-    }
-
-    /// Type line, rarity code, stat labels and the other micro-lettering.
-    var microSize: CGFloat {
-        switch self {
-        case .tiny: return 5.5
-        case .small: return 7
-        case .medium: return 9
-        case .large: return 11
-        }
-    }
-
-    var padding: CGFloat {
-        switch self {
-        case .tiny: return 3
-        case .small: return 5
-        case .medium: return 8
-        case .large: return 14
-        }
-    }
 
     /// Diagonal cut on the card's own outline.
     var notch: CGFloat {
@@ -92,34 +82,104 @@ enum CardFaceSize {
         }
     }
 
-    /// How far the printed keyline sits inside the card edge.
-    var frameInset: CGFloat {
-        switch self {
-        case .tiny: return 2
-        case .small: return 3
-        case .medium: return 4
-        case .large: return 6
-        }
-    }
-
-    /// Cut on the name bar behind the title.
-    var plateNotch: CGFloat {
+    /// How far the missing-art panel's keyline and lettering sit inside the
+    /// card edge.
+    var padding: CGFloat {
         switch self {
         case .tiny: return 3
         case .small: return 5
-        case .medium: return 6
-        case .large: return 10
+        case .medium: return 8
+        case .large: return 14
         }
     }
 
-    /// How far the damage banner's trailing edge is cut back, which is what
-    /// makes it read as a banner rather than another badge.
-    var bannerSlant: CGFloat {
+    /// The collector number on the missing-art panel — the one thing that panel
+    /// exists to say.
+    var idSize: CGFloat {
         switch self {
-        case .tiny: return 3
-        case .small: return 5
-        case .medium: return 6
-        case .large: return 9
+        case .tiny: return 7
+        case .small: return 10
+        case .medium: return 13
+        case .large: return 20
+        }
+    }
+
+    /// Micro-lettering under the collector number.
+    var microSize: CGFloat {
+        switch self {
+        case .tiny: return 5.5
+        case .small: return 7
+        case .medium: return 9
+        case .large: return 11
+        }
+    }
+
+    /// Whether the missing-art panel has room for words as well as the number.
+    /// A 44pt board slot has room for one of the two, and the number is the one
+    /// worth keeping.
+    var showsMissingArtLabel: Bool { self != .tiny }
+
+    /// The blur a fully turned card is drawn under.
+    ///
+    /// A blur radius is in points, so it has to climb with the face: four
+    /// points leaves a board slot unreadable, and those same four points across
+    /// an inspector card would read as a focus error rather than as a card
+    /// deliberately lying face down.
+    var faceDownBlur: CGFloat {
+        switch self {
+        case .tiny: return 4
+        case .small: return 7
+        case .medium: return 10
+        case .large: return 18
+        }
+    }
+
+    // MARK: Artwork budget
+
+    /// The widest, in points, this size is ever drawn anywhere in the app.
+    ///
+    /// This is what decides how much of a printed illustration is worth
+    /// decoding. The shipped art measures 744x1039 for most of the set and
+    /// 875x1177 at its largest, and a board slot is around fifty points across,
+    /// so decoding the printing whole costs five times the memory the slot can
+    /// show — enough that a board's worth of cards no longer fits in the art
+    /// cache and every one of them is decoded again on the next render pass.
+    /// Each figure below is the real ceiling of its size, checked against the
+    /// layout that produces it, and rounded up a little:
+    ///
+    ///   - `.tiny`   the largest slot `BoardLayout` can solve for, on an iPad
+    ///   - `.small`  the Collection grid's widest adaptive column
+    ///   - `.medium` the featured Leader on the regular-width Home screen
+    ///   - `.large`  the inspector, which is given the printing itself
+    ///
+    /// Zero means "do not downsample". Overshooting here is harmless for decode
+    /// *time* — that is set by the source bitstream, which has to be read
+    /// whichever thumbnail size is asked for — but it is not harmless for
+    /// memory, and memory is what evicts a screen's own working set and turns
+    /// a scroll back into a decode per cell. Undershooting is worse again: it
+    /// would soften the name bar and the printed numbers, which are pixels in
+    /// the illustration and not text this view draws.
+    ///
+    /// What each figure actually resolves to, once `artPixelSize` has divided
+    /// by the card ratio, multiplied by the display scale and rounded up the
+    /// bucket ladder in `CardArtStore` — the number that matters is the bucket,
+    /// because that is the cache key and the backing store:
+    ///
+    ///     size      3x phone           2x iPad            bytes decoded
+    ///     .tiny     404px -> 512       269px -> 512       366x512x4  = 0.75 MB
+    ///     .small    639px -> 768       426px -> 512       549x768x4  = 1.69 MB
+    ///     .medium   740px -> 768       493px -> 512
+    ///     .large    the printing itself                   875x1177x4 = 4.12 MB
+    ///
+    /// The ladder is coarse on purpose, and the coarseness is what absorbs the
+    /// gap between a ceiling and the width a slot really solved for: an iPad
+    /// leader is 141pt against `.tiny`'s 96, and both land on 512.
+    var artDrawWidth: CGFloat {
+        switch self {
+        case .tiny: return 96
+        case .small: return 152
+        case .medium: return 176
+        case .large: return 0
         }
     }
 }
@@ -137,18 +197,60 @@ struct CardFaceView: View {
     /// Draws the accent ring used for selection and legal-target highlighting.
     var highlight: Color? = nil
 
+    /// The width this face will actually be drawn at, in points, when the
+    /// caller already knows it — a board slot does, a grid cell that sizes
+    /// itself does not. It only ever narrows how much artwork is decoded; a
+    /// caller that leaves it out falls back to the widest `size` is used at.
+    var drawWidth: CGFloat? = nil
+
+    /// Whether the card is turned over, and what the viewer may see of it.
+    ///
+    /// `nil` — the default — is a card lying face up, which is every screen but
+    /// the mat. Anything else is a deliberate answer to "who is looking at
+    /// this?", and the answers are not interchangeable: see `FaceDownStyle`.
+    var faceDown: FaceDownStyle? = nil
+
     @Environment(CardDatabase.self) private var database
 
+    /// Points to device pixels. Read from the environment rather than the
+    /// screen so a 2x iPad decodes two thirds of what a 3x phone does for the
+    /// same card, and so previews and tests see a sane value.
+    @Environment(\.displayScale) private var displayScale
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
-        // Asked once per face: the answer decides the whole composition, and
-        // the store behind it can reach the disk.
-        let artwork = database.artwork(for: card)
+        // Asked once per face, and not at all for a hidden one: the store
+        // behind it can reach the disk, and a back that shows nothing has no
+        // business decoding the picture it is there to hide.
+        let artwork = isHidden
+            ? nil
+            : database.artwork(for: card, maxPixelSize: artPixelSize)
+        let showsPlaceholder = !isHidden && artwork == nil
+
+        // A Support coming into focus is the only per-frame blur outside the
+        // effect layer, and a blur is an offscreen pass on every frame of the
+        // reveal. Reduce Motion asks for no transition at all; Low Power Mode
+        // gets the same treatment, because a card that is simply *there* costs
+        // nothing and says the same thing.
+        let snapsReveal = EffectBudget.current(reduceMotion: reduceMotion).prefersStill
 
         ZStack {
-            if let artwork {
-                printedFace(artwork)
+            if isHidden {
+                CardBackView(tint: highlight ?? Palette.accentMuted)
+            } else if let artwork {
+                // Face-up and blurred deliberately share this branch: one view
+                // identity means a reveal interpolates its blur, where two
+                // branches would swap one subtree for another and cut.
+                TurnedArt(image: artwork, turn: turn, blur: size.faceDownBlur)
+                    .transaction { transaction in
+                        // Coming into focus is a change of clarity rather than
+                        // of place, so the reveal lands in a single step for
+                        // anyone who has asked not to be shown the journey.
+                        if snapsReveal { transaction.animation = nil }
+                    }
             } else {
-                generatedFace
+                missingArtPanel
             }
         }
         .aspectRatio(Metrics.cardAspect, contentMode: .fit)
@@ -156,471 +258,108 @@ struct CardFaceView: View {
             notch: size.notch,
             corners: notchCorners,
             fill: .clear,
-            stroke: edgeStroke(hasArtwork: artwork != nil),
+            stroke: edgeStroke(showsPlaceholder: showsPlaceholder),
             lineWidth: highlight == nil ? 1 : 2.5
         )
         .opacity(isDimmed ? 0.45 : 1)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityDescription)
+        .accessibilityLabel(accessibilityDescription(hasArtwork: artwork != nil))
     }
 
-    // MARK: Printed face
+    // MARK: Turn
 
-    /// Real artwork already carries the banner, the stat cells, the name bar,
-    /// the trait line and the type, printed where the card prints them. The
-    /// only thing this face adds is the selection ring, which is not printed on
-    /// anything.
-    private func printedFace(_ image: UIImage) -> some View {
-        Image(uiImage: image)
-            .resizable()
-            .aspectRatio(contentMode: .fill)
-            .allowsHitTesting(false)
-    }
+    private var isHidden: Bool { faceDown == .hidden }
 
-    /// A keyline is printed chrome too, so a card whose artwork already has one
-    /// gets nothing but the highlight.
-    private func edgeStroke(hasArtwork: Bool) -> Color {
-        if let highlight { return highlight }
-        return hasArtwork ? .clear : frameAccent.opacity(0.7)
-    }
-
-    // MARK: Generated face
-
-    /// Illustration, legibility scrim, printed furniture, printed values — in
-    /// that order, because every layer above the art has to survive being read
-    /// against whatever colour landed underneath it.
-    private var generatedFace: some View {
-        ZStack {
-            GeneratedCardArt(card: card)
-                .environment(\.cardArtDetail, ArtDetail(size))
-            scrim
-            frameOrnament
-            printedValues
-        }
-    }
-
-    /// One gradient rather than two: the top has to carry the banner and the
-    /// stat cells, the bottom a whole name bar, and the middle is left alone so
-    /// the illustration still shows through.
-    private var scrim: some View {
-        LinearGradient(
-            stops: [
-                .init(color: .black.opacity(0.55), location: 0),
-                .init(color: .clear, location: 0.30),
-                .init(color: .clear, location: 0.46),
-                .init(color: .black.opacity(0.52), location: 0.76),
-                .init(color: .black.opacity(0.88), location: 1)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        .allowsHitTesting(false)
-    }
-
-    /// The printed furniture: keylines, the foil edge premium rarities get, and
-    /// the colour spine that marks a Support card out from a body.
-    private var frameOrnament: some View {
-        ZStack {
-            if size.showsChrome {
-                NotchedRectangle(notch: max(2, size.notch - size.frameInset),
-                                 corners: notchCorners)
-                    .stroke(.white.opacity(0.20), lineWidth: 0.5)
-                    .padding(size.frameInset)
-
-                // Leaders carry a second, warmer keyline — the most ornate
-                // frame in the set, because there is only ever one in play.
-                if card.type == .leader {
-                    NotchedRectangle(notch: max(2, size.notch - size.frameInset - 2),
-                                     corners: notchCorners)
-                        .stroke(Palette.warning.opacity(0.6), lineWidth: 0.75)
-                        .padding(size.frameInset + 2)
-                }
-
-                // The sweep is an angular gradient, so it stays off the board:
-                // a 44pt slot cannot show it and would only pay for it.
-                if card.rarity.isPremium {
-                    NotchedRectangle(notch: max(2, size.notch - 1), corners: notchCorners)
-                        .stroke(card.rarity.foilSweep, lineWidth: 1.75)
-                        .padding(1)
-                }
-            }
-
-            // A card printing a SUPPORT bar can be set face-down instead of
-            // being summoned, so it gets a spine a plain body never has —
-            // legible even at board size.
-            if card.canSetAsSupport {
-                HStack(spacing: 0) {
-                    LinearGradient(
-                        colors: [card.color.tint, Palette.accent],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(width: spineWidth)
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    // MARK: Printed values
-
-    /// Everything the printed card prints, in the places it prints it: damage
-    /// on a banner at the top-leading corner, power and health at the
-    /// top-trailing, and the name bar along the bottom.
-    private var printedValues: some View {
-        VStack(spacing: 0) {
-            topBand
-            Spacer(minLength: 0)
-            if size.showsName {
-                namePlate
-            }
-        }
-        .padding(.leading, card.canSetAsSupport ? spineWidth : 0)
-        .allowsHitTesting(false)
-    }
-
-    /// Damage leads, power and health close the row.
+    /// How far over the card is: 0 the clear printing, 1 fully turned.
     ///
-    /// The same `.small` face is asked to fit a 72pt format tile and a 110pt
-    /// hand card, so the band gives ground in a fixed order — the words above
-    /// the figures go first, all of them together — rather than letting a
-    /// banner be squeezed until its number disappears.
-    private var topBand: some View {
-        ViewThatFits(in: .horizontal) {
-            topBandContent(showsLabels: size.showsStatLabels)
-            topBandContent(showsLabels: false)
-        }
-        .padding(.horizontal, size.padding)
-        .padding(.top, size.padding)
+    /// The complement of `reveal`, because that is what the drawing wants —
+    /// blur and shade both grow as the card turns away — while a caller thinks
+    /// in terms of how much of the card it has given back.
+    private var turn: Double {
+        guard case .blurredKnown(let reveal)? = faceDown else { return 0 }
+        return 1 - min(max(reveal, 0), 1)
     }
 
-    private func topBandContent(showsLabels: Bool) -> some View {
-        HStack(alignment: .top, spacing: 2) {
-            VStack(alignment: .leading, spacing: size == .large ? 4 : 2) {
-                damageBanner(showsLabels: showsLabels)
-                chakraToken
-            }
-            Spacer(minLength: 0)
-            combatCells(showsLabels: showsLabels)
-        }
+    // MARK: Artwork budget
+
+    /// The bucket the store should decode this face's illustration into.
+    ///
+    /// The printed card is taller than it is wide, so the height is the edge
+    /// that has to be satisfied — asking for the width would fetch something
+    /// thirty percent too small and blur the name bar.
+    private var artPixelSize: Int {
+        Self.artPixelSize(for: size, drawWidth: drawWidth, displayScale: displayScale)
     }
 
-    /// DMG rides the top-leading corner on an angled banner, label above the
-    /// figure. A Leader only gets one when it actually prints damage.
-    @ViewBuilder
-    private func damageBanner(showsLabels: Bool) -> some View {
-        if let damage = card.damage {
-            statStack(label: "DMG", value: "\(damage)", tint: .white, showsLabel: showsLabels)
-                .padding(.leading, size == .tiny ? 2 : 3)
-                .padding(.trailing, (size == .tiny ? 2 : 3) + size.bannerSlant)
-                .padding(.vertical, size == .tiny ? 1 : 2)
-                .background(
-                    BannerTag(slant: size.bannerSlant)
-                        .fill(
-                            LinearGradient(
-                                colors: [Palette.negative, Palette.negative.opacity(0.72)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                )
-        }
+    /// Shared with the screens that warm the cache before they draw, so a
+    /// warm-up lands on exactly the key the face will later ask for. A bucket
+    /// missed by one rung is a bucket warmed for nothing.
+    ///
+    /// That agreement is the whole guarantee, and it is fragile in one specific
+    /// way: a warm-up that omits `drawWidth` while the face supplies it — or
+    /// the other way about — mints two keys, decodes the pool twice, and leaves
+    /// the scroll hitting the decoder anyway. So the rule is that a screen
+    /// warming its own artwork must call *this* function with the same three
+    /// arguments its faces will. Both warm-ups in the app do, and both
+    /// currently pass no `drawWidth` at all, which is why every face in the app
+    /// resolves to its size's ceiling rather than to the width it was drawn at.
+    static func artPixelSize(for size: CardFaceSize,
+                             drawWidth: CGFloat? = nil,
+                             displayScale: CGFloat) -> Int {
+        // The size's own ceiling wins whenever the caller asks for more, so a
+        // mis-measured slot can never widen the budget past what it was set at.
+        let ceiling = size.artDrawWidth
+        let width = drawWidth.map { min($0, ceiling) } ?? ceiling
+        guard width > 0 else { return 0 }
+        let longestEdge = Int((width / Metrics.cardAspect * displayScale).rounded(.up))
+        return CardArtStore.bucket(forLongestEdge: longestEdge)
     }
 
-    /// POW and HP as two adjacent cells on one printed plate — LIFE in place of
-    /// HP on a Leader, which has life and no health.
-    @ViewBuilder
-    private func combatCells(showsLabels: Bool) -> some View {
-        let readouts = combatReadouts
-        if !readouts.isEmpty {
-            HStack(spacing: 0) {
-                ForEach(readouts) { readout in
-                    statStack(label: readout.label, value: readout.value,
-                              tint: readout.tint, showsLabel: showsLabels)
-                        .padding(.horizontal, size == .tiny ? 2 : 3)
-                        .padding(.vertical, size == .tiny ? 1 : 2)
-                        // The rule between the cells is an overlay, not a view
-                        // in the row: a bare `Rectangle` is flexible in height,
-                        // and would stretch the whole plate down the card.
-                        .overlay(alignment: .leading) {
-                            if readout.id != readouts.first?.id {
-                                Rectangle()
-                                    .fill(.white.opacity(0.2))
-                                    .frame(width: 0.5)
-                            }
-                        }
-                }
-            }
-            .background(
-                NotchedRectangle(notch: size.plateNotch * 0.7, corners: [.bottomLeading])
-                    .fill(.black.opacity(0.55))
-            )
-        }
-    }
+    // MARK: Missing artwork
 
-    /// The cells a card actually prints. A Support card prints none of them.
-    private var combatReadouts: [CombatReadout] {
-        var readouts: [CombatReadout] = []
-        if let power = card.power {
-            readouts.append(CombatReadout(label: "POW", value: "\(power)", tint: .white))
-        }
-        if card.type == .leader, let life = card.life {
-            readouts.append(CombatReadout(label: "LIFE", value: "\(life)", tint: Palette.warning))
-        } else if let health = card.health {
-            readouts.append(CombatReadout(label: "HP", value: "\(health)", tint: Palette.positive))
-        }
-        return readouts
-    }
+    /// What a card draws when its file is not in the bundle.
+    ///
+    /// Deliberately barren: a flat panel, a dashed keyline and the collector
+    /// number. `BundledCardArtTests` fails the build before a card without
+    /// artwork can ship, so anything that reaches this panel is a fault in the
+    /// bundle and it is drawn to read as one. The collector number is here
+    /// because it is the only thing anyone chasing that fault needs.
+    private var missingArtPanel: some View {
+        ZStack {
+            Rectangle()
+                .fill(Palette.panel)
 
-    /// Label above number, the way the printed card stacks them.
-    private func statStack(label: String,
-                           value: String,
-                           tint: Color,
-                           showsLabel: Bool) -> some View {
-        VStack(spacing: size == .large ? 0 : -1) {
-            if showsLabel {
-                Text(label)
-                    .font(Typeface.label(size.microSize))
-                    .tracking(0.3)
-                    .foregroundStyle(.white.opacity(0.75))
-                    .lineLimit(1)
-                    // The word is worth less than the figure under it, so it is
-                    // the one allowed to shrink furthest before anything clips.
-                    .minimumScaleFactor(0.5)
-            }
-            Text(value)
-                .font(Typeface.numeric(size.statSize))
-                .foregroundStyle(tint)
-                .lineLimit(1)
-                // A face is routinely given less width than the numbers printed
-                // on it: shrink the figure rather than clip it.
-                .minimumScaleFactor(0.5)
-        }
-    }
+            NotchedRectangle(notch: max(2, size.notch - 2), corners: notchCorners)
+                .stroke(Palette.border, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                .padding(size.padding)
 
-    /// Chakra is round, orange and carries a drop — nothing like the angular
-    /// banner and cells the combat numbers sit in, because the two are never
-    /// the same kind of number. Summoning a body is free, so this appears only
-    /// on a Support card and on a card that can be paid for as a jutsu.
-    @ViewBuilder
-    private var chakraToken: some View {
-        if let cost = chakraCost {
-            HStack(spacing: 1.5) {
-                Image(systemName: "drop.fill")
-                    .font(.system(size: size.statSize * 0.6, weight: .black))
-                Text("\(cost.amount)")
-                    .font(Typeface.numeric(size.statSize * 0.9))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.5)
-                if size == .large {
-                    Text(cost.isJutsu ? "Jutsu" : "Chakra")
+            VStack(spacing: 2) {
+                Text(card.id)
+                    .font(Typeface.numeric(size.idSize, weight: .bold))
+                    .foregroundStyle(Palette.textSecondary)
+                if size.showsMissingArtLabel {
+                    Text("Art missing")
                         .font(Typeface.label(size.microSize))
                         .tracking(1)
                         .textCase(.uppercase)
+                        .foregroundStyle(Palette.negative)
                 }
             }
-            .foregroundStyle(Palette.textOnAccent)
-            .padding(.horizontal, size == .tiny ? 3 : 5)
-            .padding(.vertical, size == .tiny ? 0.5 : 2)
-            .background(Palette.accent, in: Capsule())
-        }
-    }
-
-    /// The only chakra a card ever costs: the price of its jutsu, which is the
-    /// same number printed on the left of its SUPPORT bar and paid again when
-    /// the card is flipped face-up to answer. Summoning and setting are free, so
-    /// a card with neither prints no chakra at all.
-    private var chakraCost: (amount: Int, isJutsu: Bool)? {
-        if let jutsu = card.jutsuCost {
-            return (jutsu, true)
-        }
-        if let flip = card.supportFlipCost {
-            return (flip, false)
-        }
-        return nil
-    }
-
-    // MARK: Name bar
-
-    /// The bar across the bottom: name, then the trait line under it with the
-    /// card type closing it out at the trailing end.
-    private var namePlate: some View {
-        VStack(alignment: .leading, spacing: size == .large ? 3 : 1) {
-            Text(card.name)
-                .font(Typeface.display(size.nameSize, weight: .bold))
-                .foregroundStyle(.white)
-                .lineLimit(size == .large ? 2 : 1)
-                .minimumScaleFactor(0.6)
-
-            traitLine
-
-            if size.showsEffectText, !card.effect.isEmpty {
-                Text(card.effect)
-                    .font(Typeface.body(12))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 2)
-            }
-
-            if size.showsEffectText, !card.activatedAbilities.isEmpty {
-                abilityLines
-            }
-        }
-        .padding(.horizontal, size == .large ? 8 : 4)
-        .padding(.vertical, size == .large ? 6 : 2.5)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(namePlateBackground)
-    }
-
-    /// The band behind the title. A card carrying a SUPPORT bar gets a solid
-    /// colour bar where a plain body gets a neutral scrim, so the two never blur
-    /// together in hand.
-    @ViewBuilder
-    private var namePlateBackground: some View {
-        let shape = NotchedRectangle(notch: size.plateNotch, corners: [.topTrailing])
-
-        if card.canSetAsSupport, card.type != .leader {
-            shape.fill(
-                LinearGradient(
-                    colors: [card.color.deepTint.opacity(0.96), card.color.deepTint.opacity(0.7)],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
-        } else if card.type == .leader {
-            shape
-                .fill(
-                    LinearGradient(
-                        colors: [.black.opacity(0.82), .black.opacity(0.45)],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
-                .overlay(alignment: .top) {
-                    Rectangle()
-                        .fill(Palette.warning.opacity(0.8))
-                        .frame(height: 1)
-                }
-        } else {
-            shape.fill(.black.opacity(0.52))
-        }
-    }
-
-    /// Traits in small text directly under the name, with the rarity letter and
-    /// the type closing the line at the bottom-trailing corner.
-    private var traitLine: some View {
-        HStack(spacing: 3) {
-            if size.showsTraits, !card.traits.isEmpty {
-                Text(card.traits.joined(separator: " · "))
-                    .font(Typeface.label(size == .large ? 10 : 7))
-                    .foregroundStyle(.white.opacity(0.72))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-            }
-
-            Spacer(minLength: 0)
-
-            if !card.activatedAbilities.isEmpty {
-                abilityBadge
-            }
-            if size.showsTraits {
-                rarityMark
-            }
-            typeMark
-        }
-    }
-
-    private var typeMark: some View {
-        Text(card.type.title)
-            .font(Typeface.label(size.microSize))
-            .tracking(size == .large ? 1.6 : 0.6)
-            .textCase(.uppercase)
-            .foregroundStyle(typeLineTint)
             .lineLimit(1)
-            .minimumScaleFactor(0.6)
-    }
-
-    private var rarityMark: some View {
-        Text(card.rarity.code)
-            .font(Typeface.label(size.microSize))
-            .tracking(0.6)
-            .foregroundStyle(card.rarity.isPremium ? .black.opacity(0.82) : .white.opacity(0.9))
-            .padding(.horizontal, size == .large ? 5 : 3)
-            .padding(.vertical, size == .large ? 2 : 1)
-            .background {
-                if card.rarity.isPremium {
-                    Capsule().fill(card.rarity.foilSweep)
-                } else {
-                    Capsule().fill(.black.opacity(0.45))
-                }
-            }
-    }
-
-    /// Marks a card carrying a box the player can press a button for, so the
-    /// play is discoverable from the card and not only from the board.
-    ///
-    /// It is the activated boxes and only those: a passive rule or an On Summon
-    /// trigger fires on its own and needs no invitation, and badging every card
-    /// that prints anything at all would badge almost the whole set.
-    private var abilityBadge: some View {
-        HStack(spacing: 2) {
-            Image(systemName: "sparkles")
-                .font(.system(size: size.microSize, weight: .black))
-            if size == .large {
-                Text("Ability")
-                    .font(Typeface.label(size.microSize))
-                    .tracking(1)
-                    .textCase(.uppercase)
-            }
+            // The panel is drawn at every size down to a board slot, so the
+            // lettering shrinks rather than clipping the number it exists for.
+            .minimumScaleFactor(0.5)
+            .padding(size.padding * 2)
         }
-        .foregroundStyle(Palette.textOnAccent)
-        .padding(.horizontal, size == .large ? 5 : 2.5)
-        .padding(.vertical, size == .large ? 2 : 1)
-        .background(Palette.accent, in: Capsule())
+        .allowsHitTesting(false)
     }
 
-    /// One line per box the player can activate, at inspector size only.
-    ///
-    /// It states the terms rather than the rules: the printed text is already
-    /// set out in full directly above, and repeating it here would fill the
-    /// name bar with the same sentence twice.
-    private var abilityLines: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(Array(card.activatedAbilities.enumerated()), id: \.offset) { box in
-                abilityLine(box.element)
-            }
-        }
-        .padding(.top, 2)
-    }
-
-    private func abilityLine(_ ability: CardAbility) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 11, weight: .bold))
-            Text(activationTerms(ability))
-                .font(Typeface.label(11))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .foregroundStyle(Palette.warning)
-    }
-
-    /// "Activate: Main · 1 chakra · once per turn" — when the box may be used
-    /// and what using it costs, in that order, because the first thing a player
-    /// asks of an ability is whether they can reach it at all.
-    private func activationTerms(_ ability: CardAbility) -> String {
-        var parts = [ability.trigger.title]
-        parts.append(ability.cost.isFree ? "no cost" : ability.cost.summary)
-        if ability.oncePerTurn { parts.append("once per turn") }
-        return parts.joined(separator: " · ")
-    }
-
-    private var typeLineTint: Color {
-        if card.canSetAsSupport { return Palette.accent }
-        switch card.type {
-        case .leader:  return Palette.warning
-        case .character, .exCharacter, .chakra, .summon: return .white.opacity(0.78)
-        }
+    /// A keyline is printed chrome, so a card showing its own illustration gets
+    /// nothing but the highlight, and a back draws its own edge already. The
+    /// missing-art panel is neither, and needs an edge of its own.
+    private func edgeStroke(showsPlaceholder: Bool) -> Color {
+        if let highlight { return highlight }
+        return showsPlaceholder ? Palette.border : .clear
     }
 
     // MARK: Trim
@@ -631,28 +370,24 @@ struct CardFaceView: View {
         card.canSetAsSupport ? .all : .diagonal
     }
 
-    /// The colour the frame is trimmed in.
-    private var frameAccent: Color {
-        switch card.type {
-        case .leader:      return Palette.warning
-        case .summon:      return Palette.positive
-        case .chakra:      return Palette.textSecondary
-        case .character, .exCharacter:
-            return card.canSetAsSupport ? Palette.accent : card.color.tint
-        }
-    }
-
-    private var spineWidth: CGFloat {
-        size == .tiny ? 2.5 : 4
-    }
-
     // MARK: Accessibility
 
-    /// Spoken in full at every size and from either source: a board slot prints
-    /// almost nothing, and an imported illustration prints everything in pixels
-    /// VoiceOver cannot read.
-    private var accessibilityDescription: String {
-        var parts = [card.name, card.id, card.type.title, card.color.title, card.rarity.title]
+    /// Spoken in full at every size: a board slot shows a picture and no text
+    /// at all, and the printing carries its numbers as pixels VoiceOver cannot
+    /// read.
+    ///
+    /// The face-down rule applies here before anything else. Naming the card
+    /// behind an opaque back would hand VoiceOver precisely what that back is
+    /// drawn to keep, so a hidden card says only that it is one.
+    private func accessibilityDescription(hasArtwork: Bool) -> String {
+        guard !isHidden else { return "Face-down card" }
+
+        var parts: [String] = []
+        if faceDown != nil { parts.append("face-down") }
+        if !hasArtwork { parts.append("artwork missing") }
+
+        parts.append(contentsOf: [card.name, card.id, card.type.title,
+                                  card.color.title, card.rarity.title])
         if !card.traits.isEmpty {
             parts.append(card.traits.joined(separator: ", "))
         }
@@ -682,704 +417,96 @@ struct CardFaceView: View {
         }
         return phrases.isEmpty ? nil : phrases.joined(separator: ", ")
     }
-}
 
-// MARK: - Printed stat cell
-
-/// One printed combat cell: the word above the figure, and the ink the figure
-/// is set in.
-private struct CombatReadout: Identifiable {
-    let label: String
-    let value: String
-    let tint: Color
-
-    var id: String { label }
-}
-
-/// The damage banner: square where it meets the card's leading edge, cut back
-/// on the diagonal at its trailing edge so it hangs like a ribbon.
-private struct BannerTag: Shape {
-    var slant: CGFloat
-
-    func path(in rect: CGRect) -> Path {
-        let cut = min(slant, rect.width / 2)
-        var path = Path()
-        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX - cut, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        path.closeSubpath()
-        return path
+    /// "Activate: Main · 1 chakra · once per turn" — when the box may be used
+    /// and what using it costs, in that order, because the first thing a player
+    /// asks of an ability is whether they can reach it at all.
+    private func activationTerms(_ ability: CardAbility) -> String {
+        var parts = [ability.trigger.title]
+        parts.append(ability.cost.isFree ? "no cost" : ability.cost.summary)
+        if ability.oncePerTurn { parts.append("once per turn") }
+        return parts.joined(separator: " · ")
     }
 }
 
-// MARK: - Rarity trim
+// MARK: - Turned card
 
-private extension Rarity {
-
-    /// Rarities printed on foil stock, which the frame imitates with a swept
-    /// metallic keyline rather than relying on the letter alone.
-    var isPremium: Bool {
-        self == .superRare || self == .leader || self == .secretBox
-    }
-
-    /// The metal each premium rarity is struck in. Non-premium rarities never
-    /// reach the sweep, but return a usable pair so the gradient is always
-    /// well formed.
-    var foilStops: [Color] {
-        switch self {
-        case .leader, .superRare:
-            return [Palette.adaptive(dark: 0xC9932F, light: 0xB8811F),
-                    Palette.adaptive(dark: 0xFFF0C0, light: 0xFFE9A8),
-                    Palette.adaptive(dark: 0xE8C071, light: 0xD9A63F),
-                    Palette.adaptive(dark: 0xFFFAE6, light: 0xFFF3CC)]
-        case .secretBox:
-            return [Palette.adaptive(dark: 0x8E7BD6, light: 0x6E58C4),
-                    Palette.adaptive(dark: 0xE6DEFF, light: 0xD6CBFF),
-                    Palette.adaptive(dark: 0x6FB6D8, light: 0x4E93B8),
-                    Palette.adaptive(dark: 0xF2ECFF, light: 0xE4DBFF)]
-        case .common, .rare:
-            return [Palette.border, Palette.border]
-        }
-    }
-
-    /// A full turn of the metal, closed on itself so the sweep has no seam.
-    var foilSweep: AngularGradient {
-        let stops = foilStops
-        return AngularGradient(colors: stops + [stops[0]], center: .center)
-    }
-}
-
-// MARK: - Art detail
-
-/// How much of the generated illustration is worth drawing at a given size.
+/// The printing, at a given degree of turn.
 ///
-/// A 44pt board slot cannot show a second ring, a flourish or a grain tile, so
-/// it is not asked to pay for them: the cheapest bucket draws a ground, one
-/// figure and a vignette, where the inspector draws the full stack.
-private enum ArtDetail: Int {
-    case minimal = 0   // board slots
-    case reduced = 1   // hand cards, collection and deck-builder grids
-    case full    = 2   // the inspector
+/// Its own view, and an `Animatable` one, for a single reason: the blur has to
+/// interpolate. SwiftUI animates a view's `animatableData`, so the figure that
+/// moves has to belong to the smallest view that draws it — which also means a
+/// Support revealing on the chain re-runs this body once a frame rather than
+/// `CardFaceView`'s, and never re-asks the art store for its picture.
+private struct TurnedArt: View, Animatable {
+    let image: UIImage
 
-    init(_ size: CardFaceSize) {
-        switch size {
-        case .tiny:            self = .minimal
-        case .small, .medium:  self = .reduced
-        case .large:           self = .full
-        }
+    /// 0 is the clear printing, 1 the card fully turned over.
+    var turn: Double
+
+    /// The radius a turn of 1 reaches, set by the size the face is drawn at.
+    let blur: CGFloat
+
+    var animatableData: Double {
+        get { turn }
+        set { turn = newValue }
     }
-
-    var isAtLeastReduced: Bool { self != .minimal }
-    var isFull: Bool { self == .full }
-
-    /// Caps on the repeated elements in a motif. The seed still picks the same
-    /// number at every size — it is clamped afterwards, so a card keeps its
-    /// character when it changes size instead of becoming a different picture.
-    var spokeCap: Int {
-        switch self {
-        case .minimal: return 6
-        case .reduced: return 12
-        case .full:    return 20
-        }
-    }
-
-    var bladeCap: Int {
-        switch self {
-        case .minimal: return 3
-        case .reduced: return 5
-        case .full:    return 8
-        }
-    }
-
-    var bandCap: Int {
-        switch self {
-        case .minimal: return 3
-        case .reduced: return 5
-        case .full:    return 7
-        }
-    }
-
-    var facetCap: Int {
-        switch self {
-        case .minimal: return 5
-        case .reduced: return 7
-        case .full:    return 10
-        }
-    }
-
-    /// Samples along the Chakra spiral. Ninety-six segments is a curve; at
-    /// board size twenty-four is indistinguishable and a quarter of the path.
-    var spiralSegments: Int {
-        switch self {
-        case .minimal: return 24
-        case .reduced: return 48
-        case .full:    return 96
-        }
-    }
-}
-
-private struct CardArtDetailKey: EnvironmentKey {
-    static let defaultValue: ArtDetail = .full
-}
-
-private extension EnvironmentValues {
-    /// Set by `CardFaceView`, so `GeneratedCardArt` can thin itself out without
-    /// taking a parameter every caller would have to pass.
-    var cardArtDetail: ArtDetail {
-        get { self[CardArtDetailKey.self] }
-        set { self[CardArtDetailKey.self] = newValue }
-    }
-}
-
-// MARK: - Generated art
-
-/// A deterministic illustration derived from the card's own identity.
-///
-/// The card type picks the motif — a Leader draws a crest, a Support card draws
-/// banded strata, a Chakra card draws a spiral — and a seed hashed out of the
-/// collector number decides how many elements it has, how they are turned,
-/// weighted and offset.
-///
-/// Everything is plain shapes and gradients over a single `GeometryReader`, and
-/// none of it animates, so the whole face is flattened once by `drawingGroup()`
-/// and scrolled as a bitmap after that. The recipe behind it is cached, and how
-/// much of it is drawn depends on the size the face was asked for.
-struct GeneratedCardArt: View {
-    let card: Card
-
-    @Environment(\.cardArtDetail) private var detail
 
     var body: some View {
-        let recipe = ArtRecipeCache.recipe(for: card, detail: detail)
-
-        ZStack {
-            ground(recipe)
-            wash(recipe)
-            if recipe.detail.isAtLeastReduced {
-                bloom(recipe)
-            }
-            motifLayer(recipe)
-            if recipe.detail.isFull {
-                sheen(recipe)
-            }
-            vignette
-            if recipe.detail.isAtLeastReduced {
-                ArtTexture.grain
-                    .resizable(resizingMode: .tile)
-                    .opacity(0.48)
-            }
-        }
-        .drawingGroup()
-    }
-
-    // MARK: Ground
-
-    /// The colour-identity gradient, run along a diagonal the seed picked.
-    private func ground(_ recipe: ArtRecipe) -> some View {
-        LinearGradient(
-            stops: [
-                .init(color: card.color.deepTint, location: 0),
-                .init(color: card.color.tint.opacity(0.82), location: recipe.groundMid),
-                .init(color: card.color.deepTint.opacity(0.95), location: 1)
-            ],
-            startPoint: recipe.gradientStart,
-            endPoint: recipe.gradientEnd
-        )
-    }
-
-    /// A whisper of black or white over the ground. Three colours across a
-    /// sixty-nine card pool is not much range, so each card is pushed a shade
-    /// lighter or darker than its neighbours.
-    private func wash(_ recipe: ArtRecipe) -> some View {
-        (recipe.wash < 0 ? Color.black : Color.white).opacity(abs(recipe.wash))
-    }
-
-    /// A soft light source behind the motif, so the figure has something to sit
-    /// against rather than floating on a flat field.
-    private func bloom(_ recipe: ArtRecipe) -> some View {
-        EllipticalGradient(
-            colors: [card.color.tint.opacity(0.65), .clear],
-            center: recipe.bloom,
-            startRadiusFraction: 0,
-            endRadiusFraction: recipe.bloomRadius
-        )
-    }
-
-    /// A single raking highlight and its shadow, angled by the seed.
-    private func sheen(_ recipe: ArtRecipe) -> some View {
-        LinearGradient(
-            stops: [
-                .init(color: .clear, location: 0),
-                .init(color: .black.opacity(0.12), location: 0.34),
-                .init(color: .white.opacity(0.20), location: 0.5),
-                .init(color: .white.opacity(0.05), location: 0.6),
-                .init(color: .clear, location: 1)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        .rotationEffect(.degrees(recipe.sheenAngle))
-        .scaleEffect(1.9)
-    }
-
-    private var vignette: some View {
-        EllipticalGradient(
-            stops: [
-                .init(color: .clear, location: 0.32),
-                .init(color: .black.opacity(0.5), location: 1)
-            ],
-            center: .center,
-            startRadiusFraction: 0,
-            endRadiusFraction: 0.82
-        )
-    }
-
-    // MARK: Motif
-
-    /// One `GeometryReader` for the whole figure: every stroke weight and
-    /// radius below is expressed against the card's own short side, so the face
-    /// looks the same at 44pt as it does in the inspector.
-    private func motifLayer(_ recipe: ArtRecipe) -> some View {
-        GeometryReader { geo in
-            figure(recipe, in: geo.size)
-                .frame(width: geo.size.width, height: geo.size.height)
+        // The blur is applied only when there is one to apply. A zero-radius
+        // blur is not free — it still hands the layer a filter and an offscreen
+        // pass — and almost every face in the app is face up. Branching here
+        // rather than in `CardFaceView` costs the reveal nothing: the
+        // interpolation lives on `animatableData`, not on which shape this body
+        // takes in a given frame.
+        if turn > 0 {
+            printing
+                // `opaque` stops the blur sampling transparency in from outside
+                // the card and feathering its own edges away.
+                .blur(radius: blur * turn, opaque: true)
+                // A turned card is a card in shadow as well as out of focus.
+                // Blur on its own reads as a rendering fault; the shade is what
+                // says the state is deliberate.
+                .overlay(Color.black.opacity(0.32 * turn))
+        } else {
+            printing
         }
     }
 
-    private func figure(_ recipe: ArtRecipe, in size: CGSize) -> some View {
-        let unit = min(size.width, size.height)
-        let origin = recipe.centre.point(in: CGRect(origin: .zero, size: size))
-
-        return ZStack {
-            primaryFigure(recipe, unit: unit, origin: origin, in: size)
-                .scaleEffect(recipe.figureScale, anchor: recipe.centre)
-            if recipe.detail.isFull {
-                flourish(recipe, unit: unit, in: size)
-            }
-        }
-    }
-
-    /// One extra mark, chosen by the seed and laid over the motif, so two cards
-    /// of the same type never resolve to the same picture. It is the first
-    /// thing dropped below inspector size: it is the layer that differentiates
-    /// two cards you are looking at side by side, not one you scroll past.
-    @ViewBuilder
-    private func flourish(_ recipe: ArtRecipe, unit: CGFloat, in size: CGSize) -> some View {
-        switch recipe.flourish {
-        case .plain:
-            EmptyView()
-        case .halo:
-            Circle()
-                .stroke(.white.opacity(0.13), lineWidth: unit * 0.01)
-                .frame(width: unit * recipe.flourishScale, height: unit * recipe.flourishScale)
-                .position(x: size.width * recipe.flourishCentre.x,
-                          y: size.height * recipe.flourishCentre.y)
-        case .strata:
-            BandStack(count: recipe.bands, thickness: 0.16,
-                      skew: recipe.skew, phase: recipe.phase)
-                .fill(.black.opacity(0.13))
-        case .shard:
-            SigilPolygon(sides: 3, rotation: recipe.secondRotation,
-                         radiusRatio: recipe.flourishScale * 0.5,
-                         centre: recipe.flourishCentre)
-                .fill(.white.opacity(0.09))
-        }
-    }
-
-    /// Every motif is built in the same order at every size — the extra passes
-    /// are gated in place rather than reordered, so the cheap version is the
-    /// expensive one with layers lifted off it.
-    @ViewBuilder
-    private func primaryFigure(_ recipe: ArtRecipe,
-                               unit: CGFloat,
-                               origin: CGPoint,
-                               in size: CGSize) -> some View {
-        switch recipe.motif {
-        case .crest:
-            ZStack {
-                RadiatingSpokes(count: recipe.spokes, rotation: recipe.rotation,
-                                spread: recipe.spread, innerRatio: recipe.innerRatio,
-                                centre: recipe.centre)
-                    .fill(.white.opacity(0.15))
-                if recipe.detail.isFull {
-                    RadiatingSpokes(count: max(3, recipe.spokes / 3), rotation: recipe.secondRotation,
-                                    spread: recipe.spread * 3.2, innerRatio: recipe.innerRatio * 1.8,
-                                    centre: recipe.centre)
-                        .fill(.black.opacity(0.16))
-                }
-                Circle()
-                    .stroke(.white.opacity(0.32), lineWidth: unit * 0.02)
-                    .frame(width: unit * 0.56, height: unit * 0.56)
-                    .position(origin)
-                if recipe.detail.isFull {
-                    Circle()
-                        .stroke(.white.opacity(0.16), lineWidth: unit * 0.007)
-                        .frame(width: unit * (0.56 + recipe.ringGap),
-                               height: unit * (0.56 + recipe.ringGap))
-                        .position(origin)
-                }
-                if recipe.detail.isAtLeastReduced {
-                    SigilPolygon(sides: recipe.facets, rotation: recipe.rotation,
-                                 radiusRatio: 0.17, centre: recipe.centre)
-                        .fill(.white.opacity(0.22))
-                }
-                if recipe.detail.isFull {
-                    SigilPolygon(sides: recipe.facets,
-                                 rotation: recipe.rotation + 180 / Double(recipe.facets),
-                                 radiusRatio: 0.24, centre: recipe.centre)
-                        .stroke(.black.opacity(0.22), lineWidth: unit * 0.012)
-                }
-            }
-
-        case .nova:
-            ZStack {
-                BladeFan(count: recipe.blades, rotation: recipe.rotation,
-                         sweep: recipe.sweep, innerRatio: recipe.innerRatio,
-                         centre: recipe.centre)
-                    .fill(.white.opacity(0.18))
-                if recipe.detail.isFull {
-                    RadiatingSpokes(count: recipe.spokes, rotation: recipe.secondRotation,
-                                    spread: recipe.spread * 0.6, innerRatio: 0.3,
-                                    centre: recipe.centre)
-                        .fill(.white.opacity(0.11))
-                }
-                if recipe.detail.isAtLeastReduced {
-                    Circle()
-                        .stroke(.white.opacity(0.28), lineWidth: unit * 0.03)
-                        .frame(width: unit * 0.42, height: unit * 0.42)
-                        .position(origin)
-                }
-                if recipe.detail.isFull {
-                    Circle()
-                        .fill(.white.opacity(0.14))
-                        .frame(width: unit * 0.17, height: unit * 0.17)
-                        .position(origin)
-                }
-            }
-
-        case .shuriken:
-            ZStack {
-                BladeFan(count: recipe.blades, rotation: recipe.rotation,
-                         sweep: recipe.sweep, innerRatio: recipe.innerRatio,
-                         centre: recipe.centre)
-                    .fill(.white.opacity(0.17))
-                if recipe.detail.isFull {
-                    BladeFan(count: recipe.blades,
-                             rotation: recipe.rotation + 180 / Double(recipe.blades),
-                             sweep: recipe.sweep * 0.7, innerRatio: recipe.innerRatio * 2,
-                             centre: recipe.centre)
-                        .fill(.black.opacity(0.15))
-                }
-                if recipe.detail.isAtLeastReduced {
-                    Circle()
-                        .stroke(.white.opacity(0.24), lineWidth: unit * 0.022)
-                        .frame(width: unit * 0.28, height: unit * 0.28)
-                        .position(origin)
-                }
-            }
-
-        case .scroll:
-            let seal = unit * (0.24 + recipe.flourishScale * 0.16)
-            ZStack {
-                BandStack(count: recipe.bands, thickness: recipe.bandWeight,
-                          skew: recipe.skew, phase: recipe.phase)
-                    .fill(.white.opacity(0.13))
-                if recipe.detail.isFull {
-                    BandStack(count: recipe.bands + 2, thickness: 0.2,
-                              skew: recipe.skew, phase: recipe.phase + 0.4)
-                        .fill(.black.opacity(0.16))
-                }
-                // A seal stamped off-centre: the one motif in the set with no
-                // radial symmetry, so Support reads instantly in a hand.
-                if recipe.detail.isAtLeastReduced {
-                    Circle()
-                        .stroke(.white.opacity(0.3), lineWidth: unit * 0.025)
-                        .frame(width: seal, height: seal)
-                        .position(x: size.width * recipe.centre.x,
-                                  y: size.height * recipe.sealDrop)
-                }
-                if recipe.detail.isFull {
-                    SigilPolygon(sides: recipe.facets, rotation: recipe.rotation,
-                                 radiusRatio: Double(seal / unit) * 0.26,
-                                 centre: UnitPoint(x: recipe.centre.x, y: recipe.sealDrop))
-                        .fill(.white.opacity(0.24))
-                }
-            }
-
-        case .spiral:
-            ZStack {
-                ChakraSpiral(turns: recipe.turns, rotation: recipe.rotation,
-                             startRatio: 0.08, centre: recipe.centre,
-                             segments: recipe.spiralSegments)
-                    .stroke(.white.opacity(0.3), style: StrokeStyle(lineWidth: unit * 0.03,
-                                                                    lineCap: .round))
-                if recipe.detail.isFull {
-                    ChakraSpiral(turns: recipe.turns * 0.8, rotation: recipe.secondRotation,
-                                 startRatio: 0.16, centre: recipe.centre,
-                                 segments: recipe.spiralSegments)
-                        .stroke(.black.opacity(0.2), style: StrokeStyle(lineWidth: unit * 0.016,
-                                                                        lineCap: .round))
-                }
-                if recipe.detail.isAtLeastReduced {
-                    Circle()
-                        .fill(.white.opacity(0.16))
-                        .frame(width: unit * 0.18, height: unit * 0.18)
-                        .position(origin)
-                }
-            }
-
-        case .sigil:
-            ZStack {
-                SigilPolygon(sides: recipe.facets, rotation: recipe.rotation,
-                             radiusRatio: 0.44, centre: recipe.centre)
-                    .fill(.white.opacity(0.12))
-                if recipe.detail.isFull {
-                    SigilPolygon(sides: 3, rotation: recipe.secondRotation,
-                                 radiusRatio: 0.4, centre: recipe.centre)
-                        .fill(.black.opacity(0.16))
-                    SigilPolygon(sides: 5, rotation: recipe.rotation * 0.5,
-                                 radiusRatio: 0.3, centre: recipe.centre)
-                        .fill(.white.opacity(0.16))
-                }
-                if recipe.detail.isAtLeastReduced {
-                    SigilPolygon(sides: recipe.facets, rotation: recipe.rotation,
-                                 radiusRatio: 0.52, centre: recipe.centre)
-                        .stroke(.white.opacity(0.26), lineWidth: unit * 0.014)
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Recipe cache
-
-/// Recipes are cheap to draw with and needlessly expensive to rebuild: a
-/// collection grid asks for the same faces every time the player scrolls back
-/// up. They are held per card and per detail bucket, and the cache is bounded
-/// so an imported pool of any size cannot grow it without limit.
-private enum ArtRecipeCache {
-
-    /// Comfortably more than the shipped pool across all three buckets, and
-    /// small enough that a big imported set still evicts.
-    private static let limit = 512
-
-    private static let store: NSCache<NSString, RecipeBox> = {
-        let cache = NSCache<NSString, RecipeBox>()
-        cache.countLimit = limit
-        return cache
-    }()
-
-    static func recipe(for card: Card, detail: ArtDetail) -> ArtRecipe {
-        let key = "\(card.id)|\(card.name)|\(detail.rawValue)" as NSString
-        if let hit = store.object(forKey: key) {
-            return hit.recipe
-        }
-        let built = ArtRecipe(card: card, detail: detail)
-        store.setObject(RecipeBox(built), forKey: key)
-        return built
-    }
-}
-
-/// `NSCache` only holds objects, and a recipe is a value.
-private final class RecipeBox {
-    let recipe: ArtRecipe
-
-    init(_ recipe: ArtRecipe) {
-        self.recipe = recipe
-    }
-}
-
-// MARK: - Art recipe
-
-/// Which figure a card type draws.
-private enum ArtMotif {
-    case crest      // Leaders
-    case nova       // EX Characters
-    case shuriken   // Characters
-    case scroll     // Cards printing a SUPPORT bar
-    case spiral     // Chakra
-    case sigil      // Summons
-
-    init(_ card: Card) {
-        // The SUPPORT bar wins over the type: it is the thing a player is
-        // looking for on the mat, and it is not a type any more.
-        if card.canSetAsSupport {
-            self = .scroll
-            return
-        }
-        switch card.type {
-        case .leader:      self = .crest
-        case .exCharacter: self = .nova
-        case .character:   self = .shuriken
-        case .chakra:      self = .spiral
-        case .summon:      self = .sigil
-        }
-    }
-}
-
-/// The extra mark laid over a motif, so cards sharing a type still part company.
-private enum ArtFlourish {
-    case plain
-    case halo
-    case strata
-    case shard
-
-    init(_ index: Int) {
-        switch index {
-        case 0:  self = .plain
-        case 1:  self = .halo
-        case 2:  self = .strata
-        default: self = .shard
-        }
-    }
-}
-
-/// Every decision the generated face makes, taken once at init from the card's
-/// own collector number so the same card always draws identically.
-private struct ArtRecipe {
-    let detail: ArtDetail
-    let motif: ArtMotif
-    let flourish: ArtFlourish
-    let spokes: Int
-    let blades: Int
-    let bands: Int
-    /// Sides of the polygon at the heart of the crest and the summon sigil.
-    let facets: Int
-    let spiralSegments: Int
-    let rotation: Double
-    let secondRotation: Double
-    let spread: Double
-    let sweep: Double
-    let innerRatio: Double
-    let centre: UnitPoint
-    let figureScale: CGFloat
-    let flourishCentre: UnitPoint
-    let flourishScale: Double
-    let bloom: UnitPoint
-    let bloomRadius: CGFloat
-    let sheenAngle: Double
-    let turns: Double
-    let skew: Double
-    /// How much of each Support band's slice is inked.
-    let bandWeight: Double
-    let phase: Double
-    /// Where the Support seal sits down the face.
-    let sealDrop: Double
-    /// Gap between the crest's two rings.
-    let ringGap: Double
-    let groundMid: Double
-    /// Signed lift on the ground: negative darkens, positive lightens.
-    let wash: Double
-    let gradientStart: UnitPoint
-    let gradientEnd: UnitPoint
-
-    init(card: Card, detail: ArtDetail) {
-        // Name as well as number, so two cards printed with the same name at
-        // different numbers still part company.
-        var seed = CardSeed(card.id + "/" + card.name)
-
-        self.detail = detail
-        motif = ArtMotif(card)
-        flourish = ArtFlourish(seed.int(0...3))
-
-        // Every value below is drawn from the seed in the same order whatever
-        // the detail bucket, and only then clamped, so the small face is the
-        // large one with elements taken away — not a different card.
-        spokes = min(seed.int(6...20), detail.spokeCap)
-        blades = min(seed.int(3...8), detail.bladeCap)
-        bands = min(seed.int(3...7), detail.bandCap)
-        facets = min(seed.int(5...10), detail.facetCap)
-        spiralSegments = detail.spiralSegments
-
-        rotation = seed.double(0...360)
-        secondRotation = seed.double(0...360)
-        spread = seed.double(1.2...5)
-        sweep = seed.double(26...70)
-        innerRatio = seed.double(0.06...0.32)
-        centre = UnitPoint(x: seed.double(0.26...0.74), y: seed.double(0.22...0.56))
-        figureScale = CGFloat(seed.double(0.62...1.2))
-        flourishCentre = UnitPoint(x: seed.double(0.15...0.85), y: seed.double(0.15...0.8))
-        flourishScale = seed.double(0.3...1.1)
-        bloom = UnitPoint(x: seed.double(0.24...0.76), y: seed.double(0.16...0.5))
-        bloomRadius = CGFloat(seed.double(0.45...1))
-        sheenAngle = seed.double((-52)...(-4))
-        turns = seed.double(1.8...4)
-        skew = seed.double((-0.42)...0.42)
-        bandWeight = seed.double(0.3...0.8)
-        phase = seed.double(0...1)
-        sealDrop = seed.double(0.56...0.78)
-        ringGap = seed.double(0.12...0.4)
-        groundMid = seed.double(0.34...0.72)
-        wash = seed.double((-0.14)...0.1)
-
-        let (start, end) = Self.diagonal(seed.int(0...3))
-        gradientStart = start
-        gradientEnd = end
-    }
-
-    private static func diagonal(_ corner: Int) -> (UnitPoint, UnitPoint) {
-        switch corner {
-        case 0:  return (.topLeading, .bottomTrailing)
-        case 1:  return (.topTrailing, .bottomLeading)
-        case 2:  return (.top, .bottom)
-        default: return (.bottomLeading, .topTrailing)
-        }
-    }
-}
-
-// MARK: - Seeded generator
-
-/// A deterministic generator. `hashValue` is salted per process, so the digest
-/// is computed here instead and a card looks the same across launches.
-private struct CardSeed {
-    private var state: UInt64
-
-    /// FNV-1a over the string, then SplitMix64 for the stream itself.
-    init(_ source: String) {
-        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in source.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x0000_0100_0000_01b3
-        }
-        state = hash == 0 ? 0x9E37_79B9_7F4A_7C15 : hash
-    }
-
-    private mutating func next() -> UInt64 {
-        state = state &+ 0x9E37_79B9_7F4A_7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-        return z ^ (z >> 31)
-    }
-
-    /// A value in `0..<1`.
-    mutating func unit() -> Double {
-        Double(next() >> 11) * (1.0 / 9_007_199_254_740_992.0)
-    }
-
-    mutating func double(_ range: ClosedRange<Double>) -> Double {
-        range.lowerBound + unit() * (range.upperBound - range.lowerBound)
-    }
-
-    mutating func int(_ range: ClosedRange<Int>) -> Int {
-        let span = range.upperBound - range.lowerBound + 1
-        guard span > 1 else { return range.lowerBound }
-        return range.lowerBound + Int(next() % UInt64(span))
+    private var printing: some View {
+        Image(uiImage: image)
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .allowsHitTesting(false)
     }
 }
 
 // MARK: - Grain
 
-/// One small tile of static noise, built once and shared by every face. Tiling
-/// a bitmap is the only way to get real grain without doing per-pixel work at
-/// draw time.
+/// One small tile of static noise, built once and shared by every card back.
+/// Tiling a bitmap is the only way to get real grain without doing per-pixel
+/// work at draw time.
+///
+/// The values come from a counter-based hash rather than `Double.random`, so
+/// the tile is identical on every launch and the back never shimmers between
+/// one run of the app and the next.
 private enum ArtTexture {
     static let grain = Image(uiImage: makeGrain())
 
     private static func makeGrain() -> UIImage {
         let side = 48
-        var seed = CardSeed("ntcg.grain")
+        var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+
+        /// SplitMix64, narrowed to `0..<1`.
+        func nextUnit() -> Double {
+            state = state &+ 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            z ^= z >> 31
+            return Double(z >> 11) * (1.0 / 9_007_199_254_740_992.0)
+        }
+
         let format = UIGraphicsImageRendererFormat.preferred()
         format.scale = 1
         format.opaque = false
@@ -1392,7 +519,7 @@ private enum ArtTexture {
             let cg = context.cgContext
             for y in 0..<side {
                 for x in 0..<side {
-                    let value = seed.unit()
+                    let value = nextUnit()
                     cg.setFillColor(gray: value > 0.5 ? 1 : 0,
                                     alpha: abs(value - 0.5) * 0.34)
                     cg.fill(CGRect(x: x, y: y, width: 1, height: 1))
@@ -1402,7 +529,7 @@ private enum ArtTexture {
     }
 }
 
-// MARK: - Motif shapes
+// MARK: - Back shapes
 
 /// Straight spokes fired out of a point.
 private struct RadiatingSpokes: Shape {
@@ -1437,107 +564,7 @@ private struct RadiatingSpokes: Shape {
     }
 }
 
-/// Curved blades turning about a point — the shuriken silhouette.
-private struct BladeFan: Shape {
-    var count: Int
-    var rotation: Double
-    /// Degrees of arc one blade covers.
-    var sweep: Double
-    var innerRatio: Double
-    var centre: UnitPoint
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        guard count > 0, rect.width > 0, rect.height > 0 else { return path }
-
-        let origin = centre.point(in: rect)
-        let radius = Double(min(rect.width, rect.height)) * 0.78
-        let inner = radius * innerRatio
-        let step = 360 / Double(count)
-
-        for index in 0..<count {
-            let base = rotation + step * Double(index)
-            let tip = base + sweep
-            path.move(to: origin.offset(by: inner, at: base.radians))
-            path.addQuadCurve(
-                to: origin.offset(by: radius, at: tip.radians),
-                control: origin.offset(by: radius * 0.72, at: (base + sweep * 0.15).radians)
-            )
-            path.addLine(to: origin.offset(by: radius * 0.8, at: (tip + sweep * 0.32).radians))
-            path.addQuadCurve(
-                to: origin.offset(by: inner, at: (base + sweep * 0.5).radians),
-                control: origin.offset(by: radius * 0.42, at: (base + sweep * 0.9).radians)
-            )
-            path.closeSubpath()
-        }
-        return path
-    }
-}
-
-/// An Archimedean spiral, sampled finely enough to read as a curve at the size
-/// it is actually drawn.
-private struct ChakraSpiral: Shape {
-    var turns: Double
-    var rotation: Double
-    /// Radius the spiral starts at, as a fraction of its final radius.
-    var startRatio: Double
-    var centre: UnitPoint
-    var segments: Int = 96
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        guard segments > 1, rect.width > 0, rect.height > 0 else { return path }
-
-        let origin = centre.point(in: rect)
-        let radius = Double(min(rect.width, rect.height)) * 0.62
-
-        for step in 0...segments {
-            let progress = Double(step) / Double(segments)
-            let angle = (rotation + progress * turns * 360).radians
-            let distance = radius * (startRatio + (1 - startRatio) * progress)
-            let point = origin.offset(by: distance, at: angle)
-            if step == 0 {
-                path.move(to: point)
-            } else {
-                path.addLine(to: point)
-            }
-        }
-        return path
-    }
-}
-
-/// Diagonal strata laid across the whole face.
-private struct BandStack: Shape {
-    var count: Int
-    /// How much of each band's slice is inked, `0...1`.
-    var thickness: Double
-    /// Horizontal drift over the full height, as a fraction of the width.
-    var skew: Double
-    /// Where the first band starts within its slice.
-    var phase: Double
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        guard count > 0, rect.width > 0, rect.height > 0 else { return path }
-
-        let spacing = Double(rect.height) / Double(count)
-        let drift = Double(rect.width) * skew
-        let band = spacing * thickness
-        let offset = phase.truncatingRemainder(dividingBy: 1) * spacing
-
-        for index in 0..<count {
-            let top = Double(rect.minY) + spacing * Double(index) + offset - band
-            path.move(to: CGPoint(x: Double(rect.minX) - drift, y: top))
-            path.addLine(to: CGPoint(x: Double(rect.maxX) + drift, y: top - drift))
-            path.addLine(to: CGPoint(x: Double(rect.maxX) + drift, y: top - drift + band))
-            path.addLine(to: CGPoint(x: Double(rect.minX) - drift, y: top + band))
-            path.closeSubpath()
-        }
-        return path
-    }
-}
-
-/// A regular polygon, used on its own and stacked into the Summon sigil.
+/// A regular polygon, stacked into the seal at the centre of the card back.
 private struct SigilPolygon: Shape {
     var sides: Int
     var rotation: Double
@@ -1588,10 +615,14 @@ private extension Double {
 
 // MARK: - Card back
 
-/// The reverse of a card, used for opponent hands and face-down chakra. Drawn
-/// with the same passes as a generated face — ground, motif, sheen, vignette,
-/// grain — so a face-down card belongs to the same set as a face-up one, and
-/// flattened the same way, because a deck stack draws a great many of them.
+/// The reverse of a card — the one thing in the app that is drawn rather than
+/// printed, because the set ships no picture of a card's back.
+///
+/// It stands wherever a card must give nothing away at all: an opponent's hand,
+/// an opponent's set Supports, the decks, and a face-down Chakra. It is also
+/// what `FaceDownStyle.hidden` renders, so the two can never drift apart.
+/// Everything about it flattens to a single bitmap, because a deck stack draws
+/// a great many of these at once.
 struct CardBackView: View {
     var tint: Color = Palette.accent
 
@@ -1670,13 +701,10 @@ struct CardBackView: View {
 
 // MARK: - Previews
 
-/// A hand-built pool, so the previews do not depend on what happens to be in
-/// `cards.json` or on the player's imported set.
-///
-/// The two cards that carry abilities carry their real printings, so the badge
-/// and the activation line are exercised against the shape live data actually
-/// has. The Support cards are invented, because the shipped set prints none and
-/// the Support face treatment would otherwise never be seen.
+/// A hand-built pool, so the previews do not depend on the player's imported
+/// set — but built from real collector numbers, because a face is now its
+/// bundled artwork and an invented id would draw nothing but the missing-art
+/// panel. `ZZ-999` is invented deliberately, to draw exactly that.
 private func previewPool() -> [Card] {
     [
         Card(id: "N-001", name: "Naruto Uzumaki", type: .leader, color: .red,
@@ -1693,53 +721,45 @@ private func previewPool() -> [Card] {
                     effects: [.boostChosenPower(3)]
                 )
              ]),
-        Card(id: "N-004", name: "Naruto Uzumaki", type: .character, color: .red,
+        Card(id: "K-039", name: "Kakashi Hatake", type: .character, color: .red,
              rarity: .common, setCode: "01",
-             traits: ["Special", "Jinchuriki", "Hidden Leaf Village", "Team 7"],
-             cost: 2, power: 5, damage: 1, health: 4,
-             effect: "[During Your Main] K.O. all Characters.",
-             supportText: "Support: may be played as a jutsu instead of being summoned.",
-             abilities: [
-                CardAbility(
-                    trigger: .duringYourMain,
-                    cost: AbilityCost(chakra: 2),
-                    text: "K.O. all Characters.",
-                    effects: [.knockOutAll]
-                )
-             ]),
-        Card(id: "N-030", name: "Sakura Haruno", type: .exCharacter, color: .blue,
-             rarity: .rare, setCode: "01",
-             traits: ["Team 7", "Medical"],
-             cost: 3, power: 4, damage: 1, health: 5,
-             effect: "Blocks for your Leader once per turn.",
-             supportText: "Play as a jutsu: restore 2 life."),
-        Card(id: "SP-R03", name: "Nine-Tails Chakra", type: .character, color: .red,
+             traits: ["Lightning", "Hidden Leaf Village", "Team 7"],
+             cost: 1, power: 7, damage: 1, health: 4,
+             effect: "[Support Activated] Negate that card. Then, reduce your life by 2.",
+             supportText: "Lightning Blade — Support Activated: Negate that card.",
+             canSetAsSupport: true),
+        Card(id: "N-005", name: "Gamabunta", type: .exCharacter, color: .red,
              rarity: .superRare, setCode: "01",
-             traits: ["Jinchuriki"],
-             cost: 4, power: 6, damage: 1, health: 4,
-             effect: "[Support Activated] Your Characters have +2 power this turn.",
-             supportText: "Support: may be played as a jutsu instead of being summoned.",
-             canSetAsSupport: true),
-        Card(id: "SP-G01", name: "Byakugan Sight", type: .character, color: .green,
-             rarity: .common, setCode: "01",
-             traits: ["Hyuga Clan", "Special"],
-             cost: 2, power: 4, damage: 1, health: 5,
-             effect: "[Support Activated] Your Characters have +1 power this turn.",
-             supportText: "Support: may be played as a jutsu instead of being summoned.",
-             canSetAsSupport: true),
-        Card(id: "C-001", name: "Chakra Card", type: .chakra, color: .blue,
+             traits: ["Summon", "Toad"],
+             cost: 3, power: 6, damage: 1, health: 5,
+             effect: "Cannot be blocked by Characters with 4 or less power."),
+        Card(id: "N-014", name: "Sasuke Uchiha", type: .exCharacter, color: .blue,
+             rarity: .rare, setCode: "01",
+             traits: ["Uchiha Clan", "Team 7"],
+             cost: 3, power: 5, damage: 1, health: 5,
+             effect: "Rest 1 of your opponent's Characters."),
+        Card(id: "C-001", name: "CHAKRA CARD", type: .chakra, color: .blue,
              rarity: .common, setCode: "01",
              traits: ["Special"],
              effect: "Turn this face up during Refresh to pay for a card."),
-        Card(id: "S-001", name: "Summon Card", type: .summon, color: .green,
+        Card(id: "CP-001", name: "CHAKRA CARD", type: .chakra, color: .red,
+             rarity: .common, setCode: "01",
+             traits: ["Special"],
+             effect: "Turn this face up during Refresh to pay for a card."),
+        Card(id: "S-001", name: "SUMMON CARD", type: .summon, color: .green,
              rarity: .secretBox, setCode: "01",
              traits: ["Special"],
              cost: 3,
-             effect: "Place in the Summon zone.")
+             effect: "Place in the Summon zone."),
+        Card(id: "ZZ-999", name: "Unshipped Card", type: .character, color: .green,
+             rarity: .common, setCode: "99",
+             traits: ["Special"],
+             cost: 2, power: 4, damage: 1, health: 4,
+             effect: "Never printed — stands in for a card whose file is missing.")
     ]
 }
 
-#Preview("Faces at every size") {
+#Preview("Printed faces at every size") {
     let pool = previewPool()
 
     ScrollView {
@@ -1780,23 +800,54 @@ private func previewPool() -> [Card] {
     .environment(CardDatabase(cards: pool))
 }
 
-#Preview("Generated art, three budgets") {
-    let card = previewPool()[1]
+/// The information rule, side by side. The top row is one player's own set
+/// Support coming back into focus as it activates; the bottom row is the same
+/// card on the other side of the mat, which is a back and stays one.
+#Preview("Face-down: mine, then theirs") {
+    let pool = previewPool()
+    let support = pool.first { $0.canSetAsSupport } ?? pool[0]
 
     VStack(alignment: .leading, spacing: Metrics.spacingM) {
-        Text("Board · hand · inspector").sectionLabel()
+        Text("Mine · set, revealing, revealed").sectionLabel()
         HStack(spacing: Metrics.spacingS) {
-            ForEach([ArtDetail.minimal, .reduced, .full], id: \.rawValue) { detail in
-                GeneratedCardArt(card: card)
-                    .environment(\.cardArtDetail, detail)
-                    .frame(width: 130, height: 130 / Metrics.cardAspect)
-                    .clipShape(NotchedRectangle(notch: 9, corners: .diagonal))
+            ForEach([0.0, 0.5, 1.0], id: \.self) { reveal in
+                CardFaceView(card: support, size: .small,
+                             faceDown: .blurredKnown(reveal: reveal))
+                    .frame(width: 110)
             }
         }
+
+        Text("Theirs · never the printing").sectionLabel()
+        HStack(spacing: Metrics.spacingS) {
+            CardFaceView(card: support, size: .small, faceDown: .hidden)
+                .frame(width: 110)
+            CardFaceView(card: support, size: .small,
+                         highlight: Palette.accent, faceDown: .hidden)
+                .frame(width: 110)
+        }
+    }
+    .padding(Metrics.spacingL)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .background(AmbientBackground())
+    .environment(CardDatabase(cards: pool))
+}
+
+/// What a bundle fault looks like. Nothing here should ever reach a player —
+/// `BundledCardArtTests` fails the build first — which is the whole reason it
+/// is drawn as a panel and not as a picture.
+#Preview("Missing artwork") {
+    let pool = previewPool()
+    let unshipped = pool.first { $0.id == "ZZ-999" } ?? pool[0]
+
+    HStack(alignment: .top, spacing: Metrics.spacingM) {
+        CardFaceView(card: unshipped, size: .tiny).frame(width: 44)
+        CardFaceView(card: unshipped, size: .small).frame(width: 110)
+        CardFaceView(card: unshipped, size: .large).frame(width: 200)
     }
     .padding(Metrics.spacingL)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(AmbientBackground())
+    .environment(CardDatabase(cards: pool))
 }
 
 #Preview("Card back") {

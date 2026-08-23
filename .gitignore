@@ -1,5 +1,7 @@
 # Build output
 .build/
+.build-release/
+.build*/
 DerivedData/
 *.xcuserstate
 xcuserdata/
@@ -27,3 +29,7 @@ NTCGSimulator/Resources/**/*.jpeg
 
 # Research notes: durable on disk, deliberately untracked.
 notes/
+
+# Bundled soundtrack ships with the app, same call as the card artwork.
+!NTCGSimulator/Resources/Music/
+!NTCGSimulator/Resources/Music/*.mp3

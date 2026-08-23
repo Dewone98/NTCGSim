@@ -57,6 +57,18 @@ struct Journal: RandomAccessCollection, Hashable, Codable {
     /// Maximum retained lines.
     var limit: Int
 
+    /// When true, `record` drops every line instead of storing it. The AI's
+    /// search sets this on its cloned engines: a 1,600-iteration search
+    /// replays thousands of actions, and none of them belong in a log —
+    /// muting also skips the `Date`/`UUID` allocation each line would cost.
+    /// Runtime-only, so it is deliberately excluded from coding.
+    var isMuted = false
+
+    private enum CodingKeys: String, CodingKey {
+        case entries
+        case limit
+    }
+
     init(limit: Int = Journal.defaultLimit) {
         self.limit = Swift.max(1, limit)
     }
@@ -73,6 +85,7 @@ struct Journal: RandomAccessCollection, Hashable, Codable {
     /// Appends a line, trimming the oldest once the cap is passed.
     /// - Parameter timestamp: injectable so tests can pin the clock.
     mutating func record(actor: String, message: String, at timestamp: Date = Date()) {
+        guard !isMuted else { return }
         entries.append(JournalEntry(actor: actor, message: message, timestamp: timestamp))
         if entries.count > limit {
             entries.removeFirst(entries.count - limit)

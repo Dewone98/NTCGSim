@@ -61,6 +61,15 @@ struct BoardStatusBar: View {
     /// targeting mode is always next to the sentence explaining it.
     var onCancelTargeting: (() -> Void)? = nil
 
+    /// A short instruction naming what is being chosen, shown while the mat is
+    /// lit for a target — "Choose a target", "Choose up to 2".
+    ///
+    /// It sits beside the prompt rather than replacing it. The prompt is the
+    /// card's own wording and can be a whole sentence; this is the three words
+    /// telling the player that the answer is a tap on the board, which is the
+    /// one thing the printed sentence never says.
+    var targetingNote: String? = nil
+
     // MARK: Reserved heights
 
     /// Height the board reserves for this bar on a phone. Fixed rather than
@@ -87,7 +96,15 @@ struct BoardStatusBar: View {
                 HStack(spacing: Metrics.spacingXS) {
                     stateChip
                     turnLabel
-                    summonMarker
+                    // While the mat is lit, the instruction takes the marker's
+                    // place. "Summon ready" is not the fact a player choosing a
+                    // target needs, and a phone-width row has room for one of
+                    // the two — squeezing both leaves the chip as a bare icon.
+                    if let targetingNote {
+                        targetingChip(targetingNote)
+                    } else {
+                        summonMarker
+                    }
                     Spacer(minLength: 0)
                     playingLabel
                 }
@@ -116,6 +133,9 @@ struct BoardStatusBar: View {
 
             HStack(spacing: Metrics.spacingS) {
                 summonMarker
+                if let targetingNote {
+                    targetingChip(targetingNote)
+                }
                 Spacer(minLength: 0)
             }
 
@@ -183,7 +203,8 @@ struct BoardStatusBar: View {
             .accessibilityLabel("Playing, \(activePlayer)")
     }
 
-    /// The sentence, and the way out of it when the board is mid-decision.
+    /// The sentence, and the way out of it when the board is mid-decision. The
+    /// instruction that goes with it sits on the row above, beside the state.
     private var promptRow: some View {
         HStack(alignment: .center, spacing: Metrics.spacingS) {
             promptText
@@ -191,6 +212,29 @@ struct BoardStatusBar: View {
                 cancelButton(onCancelTargeting)
             }
         }
+    }
+
+    /// The instruction, in the same accent the mat lights its legal targets
+    /// with — the chip and the ring the player is being pointed at are meant to
+    /// read as one thing.
+    private func targetingChip(_ text: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "target")
+                .font(.system(size: isCompact ? 8 : 10, weight: .bold))
+            Text(text)
+                .font(Typeface.label(isCompact ? 9 : 10))
+                .tracking(1)
+                .textCase(.uppercase)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .foregroundStyle(Palette.textOnAccent)
+        .padding(.horizontal, Metrics.spacingS)
+        .padding(.vertical, 3)
+        .notchedPanel(notch: 5, corners: .diagonal, fill: Palette.accent, stroke: .clear)
+        // It shares the top row with the turn label, which gives ground first.
+        .layoutPriority(1)
+        .accessibilityLabel(text)
     }
 
     private var promptText: some View {
@@ -204,12 +248,18 @@ struct BoardStatusBar: View {
     }
 
     /// Backs out of whatever is waiting for a target.
+    ///
+    /// Fixed at its own width: the row it shares with the prompt and the
+    /// targeting chip is tight on a phone, and a compressed button breaks
+    /// "Cancel" across two lines rather than shortening the sentence beside it.
     private func cancelButton(_ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text("Cancel")
                 .font(Typeface.label(isCompact ? 9 : 11))
                 .tracking(1.2)
                 .textCase(.uppercase)
+                .lineLimit(1)
+                .fixedSize()
                 .foregroundStyle(Palette.textOnAccent)
                 .padding(.horizontal, Metrics.spacingS)
                 .frame(height: isCompact ? 28 : 34)
@@ -362,7 +412,8 @@ struct BoardStatusBar: View {
             isCompact: true,
             journalCount: 12,
             onShowJournal: {},
-            onCancelTargeting: {}
+            onCancelTargeting: {},
+            targetingNote: "Choose a target"
         )
 
         BoardStatusBar(
@@ -371,7 +422,8 @@ struct BoardStatusBar: View {
             prompt: "An opposing character loses 2 power: choose the character it acts on.",
             activePlayer: "P1",
             isCompact: false,
-            onCancelTargeting: {}
+            onCancelTargeting: {},
+            targetingNote: "Choose up to 2"
         )
         .frame(height: BoardStatusBar.regularHeight)
     }
