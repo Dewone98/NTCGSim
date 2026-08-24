@@ -6,10 +6,16 @@
 //  deck the player built. The chosen mode is carried through to the Vanilla
 //  route because it decides who holds the second deck.
 //
-//  It is also the last screen before a game against the computer, which is why
-//  the AI difficulty is offered here as well as in Settings: the strength of
-//  the opponent is a decision about the game you are about to play, and burying
-//  it behind the menu means it is only ever found after losing to kage.
+//  It is also the last screen before a game, which is why two decisions about
+//  the game itself are made here rather than in Settings: how hard the computer
+//  plays, and what the soundtrack is. Both are answers to "what do I want from
+//  the match I am about to start", and both are only ever found after the fact
+//  when they are buried behind the menu — the difficulty after losing to kage,
+//  and the music after playing a whole game in silence.
+//
+//  The music choice belongs here for a second reason as well: the soundtrack
+//  exists only while the board is on screen, so this is the last moment at
+//  which the question can be asked of a player who is about to hear the answer.
 //
 
 import SwiftUI
@@ -24,6 +30,10 @@ struct FormatChoiceView: View {
     @Environment(Router.self) private var router
     @Environment(CardDatabase.self) private var database
     @Environment(SettingsStore.self) private var settings
+
+    /// The app's one music player, read here only for its library — the list of
+    /// tracks to offer. Starting and stopping is the board's job entirely.
+    private let music = MusicPlayer.shared
 
     /// Wide enough for a `.small` card face to stay readable beside the copy.
     private static let thumbnailWidth = Metrics.controlHeight * 1.4
@@ -42,6 +52,8 @@ struct FormatChoiceView: View {
                         difficultyPanel(selection: $settings.aiDifficulty)
                     }
 
+                    musicPanel(selection: $settings.musicSelection)
+
                     Text("Format").sectionLabel()
 
                     ForEach(GameFormat.allCases, id: \.self) { format in
@@ -52,6 +64,7 @@ struct FormatChoiceView: View {
             }
             .scrollIndicators(.hidden)
         }
+        .onAppear { reconcileMusicChoice() }
     }
 
     // MARK: Difficulty
@@ -91,6 +104,89 @@ struct FormatChoiceView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(Metrics.spacingM)
         .notchedPanel()
+    }
+
+    // MARK: Music
+
+    /// What the game about to start sounds like: the four shipped tracks by
+    /// name, Shuffle, and Off.
+    ///
+    /// Built from the same chip row as the difficulty above it so the two read
+    /// as one column of "settings for this match", and scrollable sideways for
+    /// the same reason — six labels, one of them a song title, never fit across
+    /// a 393pt phone once the type scales. The choice writes straight to
+    /// `SettingsStore`, so it is remembered for the next game as well.
+    private func musicPanel(selection: Binding<MusicSelection>) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.spacingS) {
+            Text("Music").sectionLabel()
+
+            if music.library.isEmpty {
+                Text("This build shipped without any music, so the board stays quiet.")
+                    .font(Typeface.body(14))
+                    .foregroundStyle(Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    OptionPicker(options: musicOptions, selection: selection)
+                        .padding(.vertical, Metrics.spacingXS)
+                }
+
+                Text(musicDetail(for: selection.wrappedValue))
+                    .font(Typeface.body(14))
+                    .foregroundStyle(Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("It plays only while the board is on screen and stops when you "
+                     + "leave, and it stays chosen for your next game. How loud it is "
+                     + "lives in Settings.")
+                    .font(Typeface.body(12))
+                    .foregroundStyle(Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Metrics.spacingM)
+        .notchedPanel()
+    }
+
+    /// Off, Shuffle, then every track by name — the order a player looks for
+    /// them in, with the two modes first because they are what most people pick.
+    private var musicOptions: [(value: MusicSelection, title: String)] {
+        [(value: MusicSelection.off, title: "Off"),
+         (value: MusicSelection.shuffle, title: "Shuffle")]
+        + music.library.tracks.map { (value: MusicSelection.track(id: $0.id), title: $0.title) }
+    }
+
+    /// The line under the chips, which is where the difference between the
+    /// modes is actually explained — "Shuffle" and a song title look alike as
+    /// labels and do quite different things.
+    private func musicDetail(for selection: MusicSelection) -> String {
+        switch selection {
+        case .off:
+            return "No music. Card, turn and effect sounds are unaffected."
+        case .shuffle:
+            return "A different track each time one ends, faded from one into the next."
+        case .track(let id):
+            let name = music.library.track(id: id)?.title ?? "The chosen track"
+            return "\(name), on repeat for the whole game."
+        }
+    }
+
+    /// Re-reads the music folder, and repairs a choice that is no longer there.
+    ///
+    /// A track is remembered by filename, so one renamed or removed between
+    /// games would otherwise leave the row with nothing selected and the board
+    /// silent for a reason nothing on screen explains. Shuffle is the repair
+    /// because the game ships its own tracks — there is always something to
+    /// play — and Off only when the build genuinely has none.
+    private func reconcileMusicChoice() {
+        music.refreshLibrary()
+
+        guard case .track(let id) = settings.musicSelection,
+              music.library.track(id: id) == nil
+        else { return }
+
+        settings.musicSelection = music.library.isEmpty ? .off : .shuffle
     }
 
     // MARK: Panels

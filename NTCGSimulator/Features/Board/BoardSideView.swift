@@ -24,6 +24,27 @@
 //  projectile endpoint, so the board can fire a shot between two cards without
 //  either of them having to know where the other one is.
 //
+//  Every card on the field publishes its frame a second time, as a
+//  `BoardCardAnchor`. Two layers above the mat read those frames: the
+//  holograms standing over the cards, and the 3D card layer standing the
+//  cards themselves as slabs on the field stage behind the board. A card the
+//  board has handed to that layer draws no printing here — `slabs` says which
+//  — and keeps only the ring and the veil that are game state, so every
+//  badge, number and target mark on this file goes on being drawn over the
+//  top of the slab exactly as it was over the flat face.
+//
+//  That set differs from the projectile's — Supports never attack or get shot
+//  at, while a Leader publishes a frame but casts no hologram — and it
+//  carries the whole frame rather than a centre point, because a projection
+//  has to stand on a card's top edge and take its width from the card's, and
+//  a slab has to be scaled to the card's own width. Each
+//  half also publishes its three zone rows as one `playRegion` band: the space
+//  its holograms are allowed to occupy, measured by the layout that owns it
+//  rather than guessed from screen proportions. Publishing frames is all this
+//  file does; whether a card is entitled to a hologram at all is an
+//  information rule, and it is decided by the board, next to every other rule
+//  of that kind.
+//
 
 import SwiftUI
 
@@ -197,6 +218,100 @@ struct SupportReveal: Identifiable, Equatable {
     static let turn: Double = 0.32
 }
 
+// MARK: - Card anchors
+
+/// A frame the mat publishes for the hologram overlay: a card that may carry
+/// a projection, or a region a projection must respect.
+///
+/// This is the attack projectile's technique — `anchorPreference` up to one
+/// place that can see every card at once — asked a different question, and it
+/// is a second key rather than more cases on `ProjectileAnchor` for two
+/// reasons. A shot only ever flies between cards that can attack or be
+/// attacked, so Supports have no business in that vocabulary; and a shot
+/// wants a centre point where anything standing over a card wants the card's
+/// whole frame.
+///
+/// The region cases ride the same key as the card frames deliberately: both
+/// resolve through the same `GeometryProxy` in the same pass, so a card and
+/// the region that constrains its hologram can never disagree about what
+/// coordinate space they are in. Inferring the regions from screen
+/// proportions — the mistake a previous fix made by clamping to the whole
+/// overlay — is exactly what this replaces: the layout is the only party
+/// that knows where the rows end and the chrome begins, so the layout says.
+///
+/// Leaders and the Summon marker publish a frame but cast no hologram; the
+/// reasoning lives with the cast list in `GameBoardView.hologramSubjects`.
+/// They publish anyway because a frame answers two questions on this board,
+/// and the other one — where the 3D card layer has to stand this card's slab,
+/// per `BoardCard3DProjection` — takes a wider cast than the holograms do.
+enum BoardCardAnchor: Hashable {
+
+    case character(UUID)
+
+    /// A numbered Support slot, by its zero-based index. The slot rather than
+    /// the card, because the slot is what stays put while cards pass through
+    /// it — the board pairs the frame with the card it is currently drawing.
+    case support(PlayerSlot, Int)
+
+    /// One side's Leader, which lives in the label column rather than in the
+    /// zone rows. It casts no hologram — a projection there would cover the
+    /// side's name or its life readout — but it is a card on the field and it
+    /// gets a slab like any other.
+    case leader(PlayerSlot)
+
+    /// One side's Summon marker, drawn in the edge of the Chakra row.
+    case summon(PlayerSlot)
+
+    /// One side's three zone rows — Characters, Supports and Chakra — as a
+    /// single band. This is the space that side's holograms may occupy: it
+    /// excludes the Leader column (name label, Leader, life readout), the
+    /// counter column, the central status band and the hand, all of which are
+    /// game state a decoration must never cover.
+    case playRegion(PlayerSlot)
+
+    /// The central status strip between the two halves. Published so the
+    /// board can hold the near side's holograms below its bottom edge — the
+    /// strip is the one piece of chrome that sits directly against a row of
+    /// cards, and its frame moves with the layout.
+    case statusBand
+}
+
+/// Collects the frames of every card on the mat, so one overlay above the
+/// whole board can decorate them.
+///
+/// One overlay rather than one per card, and this key is what makes that
+/// possible: an overlay mounted inside a slot clips at the slot's bounds and
+/// is scaled by the board's own zoom, and a hologram has to stand more than a
+/// card's height above its slot, in screen points, and layer correctly against
+/// its neighbours and against the stage behind them.
+struct BoardCardAnchorKey: PreferenceKey {
+    static var defaultValue: [BoardCardAnchor: Anchor<CGRect>] { [:] }
+
+    static func reduce(
+        value: inout [BoardCardAnchor: Anchor<CGRect>],
+        nextValue: () -> [BoardCardAnchor: Anchor<CGRect>]
+    ) {
+        value.merge(nextValue()) { _, latest in latest }
+    }
+}
+
+extension View {
+    /// Publishes this view's frame under `anchor` for the hologram overlay.
+    ///
+    /// `transformAnchorPreference` rather than `anchorPreference`, and the
+    /// difference is load-bearing: `anchorPreference` REPLACES the subtree's
+    /// accumulated value, so a container publishing its own frame — the rows
+    /// band publishing `playRegion` — would silently erase every card anchor
+    /// inside it. Transforming merges this entry into whatever the children
+    /// already published, which makes the modifier safe on leaves and
+    /// containers alike.
+    func boardCardAnchor(_ anchor: BoardCardAnchor) -> some View {
+        transformAnchorPreference(key: BoardCardAnchorKey.self, value: .bounds) { value, bounds in
+            value[anchor] = bounds
+        }
+    }
+}
+
 // MARK: - Pool lookups
 
 /// Answers about the pool that the mat would otherwise work out again on every
@@ -208,8 +323,9 @@ struct SupportReveal: Identifiable, Equatable {
 /// search per side per pass for an answer that only changes when the pool is
 /// replaced. `poolRevision` is exactly the signal for that, so the scan happens
 /// once per pool and an integer comparison happens per render instead.
+///
 @MainActor
-private enum BoardPoolLookup {
+enum BoardPoolLookup {
 
     /// The pool the cached answers belong to. Starts at a revision no database
     /// can hold, so the first ask always fills the cache.
@@ -288,6 +404,20 @@ struct BoardSideView: View {
     /// the slot go back to being the engine's — or empty.
     var onRevealFinished: (UUID) -> Void = { _ in }
 
+    /// The cards the 3D layer behind the board is drawing as slabs.
+    ///
+    /// A slot in this set draws no printing at all: the slab underneath is
+    /// the card, and the 2D face keeps only the things that are game state —
+    /// its ring and its stepped-back veil — so badges, damage numbers and
+    /// target marks go on being drawn over the top of it. Empty is the
+    /// board's whole 2D rendering, unchanged, which is what every fallback in
+    /// `BoardCard3DBudget` collapses to.
+    ///
+    /// The board decides this from the position rather than from geometry, so
+    /// the face is told to stand aside in the same render pass that publishes
+    /// the frame the slab is placed from.
+    var slabs: Set<BoardCardAnchor> = []
+
     /// Points to device pixels, for working out how much of a printed
     /// illustration the mat is actually able to show.
     @Environment(\.displayScale) private var displayScale
@@ -359,6 +489,11 @@ struct BoardSideView: View {
             }
         }
         .frame(width: layout.rowWidth)
+        // The band this side's holograms are confined to. Published from the
+        // rows themselves rather than worked out from screen proportions, so
+        // the region is right on every device, both orientations, and both
+        // halves of a solo board that has just flipped.
+        .boardCardAnchor(.playRegion(slot))
     }
 
     /// The unbounded battle line. Five printed slots, and a horizontal scroll
@@ -419,7 +554,8 @@ struct BoardSideView: View {
                         card: card,
                         width: layout.slotWidth,
                         isDimmed: character.isRested || isPushedBack(character),
-                        highlight: highlight(for: character)
+                        highlight: highlight(for: character),
+                        rendersAsSlab: slabs.contains(.character(character.id))
                     )
                 } else {
                     CardBackView(tint: Palette.border)
@@ -467,6 +603,9 @@ struct BoardSideView: View {
         // turned on its side and scaled to the card ratio — is still aimed at
         // where it sits rather than at where its untransformed face would be.
         .projectileAnchor(.character(character.id))
+        // Published on the slot for the same reason, so a hologram stands over
+        // where a rested body actually lies rather than over its upright frame.
+        .boardCardAnchor(.character(character.id))
         .contentShape(Rectangle())
         .onTapGesture { onSelectCharacter(character) }
         .onLongPressGesture { if let card { onRead(card) } }
@@ -539,6 +678,11 @@ struct BoardSideView: View {
             }
         }
         .frame(width: layout.slotWidth, height: layout.slotHeight)
+        // The slot publishes its frame whatever is in it — including nothing.
+        // What may be projected from it is the board's decision, and a slot
+        // that stopped publishing while it held a face-down card would say
+        // that it held one.
+        .boardCardAnchor(.support(slot, index))
         .contentShape(Rectangle())
         .onTapGesture { onSelectSupport(index) }
         .onLongPressGesture {
@@ -586,7 +730,13 @@ struct BoardSideView: View {
                 card: content.card,
                 width: layout.slotWidth,
                 isDimmed: emphasis.isChoosing || emphasis.isTargetingAttack,
-                highlight: supportTint(index)
+                highlight: supportTint(index),
+                // Only a Support that is SIMPLY face-up gets a slab: the
+                // branch above is a reveal, whose blur clearing belongs to
+                // the 2D face, and the branch below is a card lying face
+                // down, whose treatment is the information rule this file's
+                // header sets out and has exactly one implementation.
+                rendersAsSlab: slabs.contains(.support(slot, index))
             )
         } else {
             // The information rule, and the one line in this file where getting
@@ -702,11 +852,19 @@ struct BoardSideView: View {
             BoardCardFace(
                 card: card,
                 width: layout.slotWidth,
-                isDimmed: side.summonRested || emphasis.isChoosing || emphasis.isTargetingAttack
+                isDimmed: side.summonRested || emphasis.isChoosing || emphasis.isTargetingAttack,
+                rendersAsSlab: slabs.contains(.summon(slot))
             )
             .rotationEffect(.degrees(side.summonRested ? 90 : 0))
             .scaleEffect(side.summonRested ? Metrics.cardAspect : 1)
             .animation(.easeOut(duration: 0.22), value: side.summonRested)
+            // The frame is the marker's own size, so adding it changes no
+            // layout — but it gives the anchor below something that stays
+            // put while the card inside it turns, exactly as a character
+            // slot does. A frame published on the rotated face would report
+            // the bounding box of a card lying on its side.
+            .frame(width: layout.slotWidth, height: layout.slotHeight)
+            .boardCardAnchor(.summon(slot))
             .contentShape(Rectangle())
             .onTapGesture { onRead(card) }
             .accessibilityElement(children: .ignore)
@@ -763,7 +921,8 @@ struct BoardSideView: View {
                     card: leader,
                     width: layout.leaderWidth,
                     isDimmed: leaderIsPushedBack,
-                    highlight: leaderHighlight
+                    highlight: leaderHighlight,
+                    rendersAsSlab: slabs.contains(.leader(slot))
                 )
                 // The Recovery action and a Leader attack both rest the
                 // Leader, so it turns on its side exactly as a body does —
@@ -781,9 +940,25 @@ struct BoardSideView: View {
 
                 floatingNumber(for: .leader(slot))
             }
+            // Pinned to the card's own size before anything is published from
+            // it, exactly as a character slot is — and for a reason that was
+            // measured rather than guessed. The badges inside this stack lay
+            // themselves out with `maxWidth`/`maxHeight: .infinity` to reach
+            // their corner, so on an unpinned `ZStack` inside a `VStack` with
+            // room to spare, the stack GREW the moment a target crosshair
+            // appeared. Both anchors below are read as "where the card is", so
+            // an inflated frame aimed the attack shot low and stood the
+            // Leader's 3D slab half a card beneath its own slot.
+            .frame(width: layout.leaderWidth, height: layout.leaderHeight)
             // Leaders attack and are attacked like anything else on the mat,
             // so the Leader publishes an endpoint exactly as a body does.
             .projectileAnchor(.leader(slot))
+            // And a card frame, published on the column's ZStack rather than
+            // on the face, so a rested Leader — turned on its side and scaled
+            // to the card ratio — is placed by where its slot is rather than
+            // by the bounding box of the turned card. The frame is what the
+            // 3D layer stands its slab on; it casts no hologram.
+            .boardCardAnchor(.leader(slot))
             .contentShape(Rectangle())
             .onTapGesture { onSelectLeader() }
             .onLongPressGesture { onRead(leader) }

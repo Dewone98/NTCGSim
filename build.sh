@@ -8,7 +8,11 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 SCHEME="NTCGSimulator"
 BUNDLE_ID="com.practiceMakesPerfect.personalProjects.NTCGSimulator"
-DEST="platform=iOS Simulator,name=iPhone 17 Pro"
+# Pick whatever iPhone simulator this machine actually has — a hardcoded name
+# breaks whenever Xcode's bundled device set changes.
+SIM_NAME="$(xcrun simctl list devices available 2>/dev/null \
+  | grep -oE 'iPhone [^(]*' | head -1 | sed 's/ *$//')"
+DEST="platform=iOS Simulator,name=${SIM_NAME:-iPhone 15}"
 DERIVED="$(cd "$(dirname "$0")" && pwd)/.build"
 
 cd "$(dirname "$0")" || exit 1

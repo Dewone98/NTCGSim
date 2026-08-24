@@ -74,25 +74,22 @@ final class SettingsStore {
 
     // MARK: Music
 
-    /// Which background track plays, if any. Off is the default: the app ships
-    /// with no music, and an app that starts making noise on first launch has
-    /// made a decision that was not its to make.
-    var musicSelection: MusicSelection = .off  { didSet { save(); syncMusic() } }
+    /// Which track the next match plays, chosen on the screen a game starts
+    /// from and remembered here.
+    ///
+    /// Shuffle is the default because the game ships its own soundtrack and the
+    /// music only ever sounds while a match is on the board — there is no
+    /// launch at which this could surprise anybody, and a card game that came
+    /// with four tracks and played none of them would be the stranger default.
+    ///
+    /// Nothing here touches `MusicPlayer`. The store is a record of what was
+    /// chosen, not a remote control: `GameBoardView` reads these two values
+    /// when it appears and hands them to the player, which is what keeps the
+    /// music inside the match instead of following the player around the app.
+    var musicSelection: MusicSelection = .shuffle  { didSet { save() } }
 
     /// Music level, 0...1, independent of the device volume.
-    var musicVolume: Double = 0.6              { didSet { save(); syncMusic() } }
-
-    /// Hands the current music choice to the player.
-    ///
-    /// The store drives the player rather than the other way round because the
-    /// choice is settled here — it is what gets persisted, and what the Play
-    /// screen and Settings both write to — so this is the one place that knows
-    /// when it changed. `apply` is idempotent, so calling it on every write
-    /// costs nothing when only the volume moved.
-    private func syncMusic() {
-        guard !isLoading else { return }
-        MusicPlayer.shared.apply(selection: musicSelection, volume: musicVolume)
-    }
+    var musicVolume: Double = 0.6                  { didSet { save() } }
 
 
     // MARK: Persistence
@@ -130,13 +127,7 @@ final class SettingsStore {
 
     private func load() {
         isLoading = true
-        defer {
-            isLoading = false
-            // The player is told once, after every value is in place, so a
-            // restored choice starts playing at the restored volume rather
-            // than at whatever the previous property happened to set.
-            syncMusic()
-        }
+        defer { isLoading = false }
 
         guard
             let data = UserDefaults.standard.data(forKey: Self.key),
@@ -153,7 +144,7 @@ final class SettingsStore {
         chatSoundEnabled   = snapshot.chatSoundEnabled
         username           = snapshot.username
         aiDifficulty       = snapshot.aiDifficulty   ?? .standard
-        musicSelection     = snapshot.musicSelection ?? .off
+        musicSelection     = snapshot.musicSelection ?? .shuffle
         musicVolume        = snapshot.musicVolume    ?? 0.6
     }
 

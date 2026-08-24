@@ -2,41 +2,48 @@
 //  MusicPlayer.swift
 //  NTCGSimulator
 //
-//  Plays the background music the owner chose, and nothing louder than that.
+//  The soundtrack for a match, and nothing else.
 //
 //  Three decisions shape the whole file:
 //
-//  Silence is the default. `MusicSelection.off` is what a fresh install holds,
-//  so an app that ships with no tracks and an owner who never opens the Music
-//  section both end up in the same place — no audio session, no timer, nothing
-//  running.
+//  The game owns the audio. The session is `.playback`, which is the category a
+//  game that ships its own music uses: it sounds through the ring/silent switch
+//  and it does not stand aside for whatever the device happened to be playing.
+//  An earlier version asked for `.ambient` with `.mixWithOthers` and then
+//  refused to start at all while `AVAudioSession.isOtherAudioPlaying` was true.
+//  The result was the opposite of polite — starting a match left our four
+//  bundled tracks silent while somebody else's album carried on, which reads
+//  from the player's seat as the game handing them off to another app. That
+//  deferral is gone. Nothing in this file opens another app, offers a system
+//  music picker, or plays anything but the files `MusicLibrary` found on disk.
 //
-//  It never takes the audio away from anyone. The session is `.ambient` with
-//  `.mixWithOthers`, which is the category that yields: it is silenced by the
-//  ring switch, it does not interrupt whatever the owner is already listening
-//  to, and it stops on its own in the background. On top of that the player
-//  watches for the secondary-audio hint and steps aside entirely when the
-//  device is playing the owner's music, because mixing a game loop underneath
-//  someone's album is worse than staying quiet.
+//  The music belongs to the match, not to the app. `startMatch` and `stopMatch`
+//  are the only doors in, and `GameBoardView` calls them from its own lifecycle
+//  — appear, disappear, and scene phase. Nothing here starts audio on its own,
+//  and `SettingsStore` no longer pokes the player when a preference is written,
+//  so the menu, the deck builder, the collection and Settings are silent by
+//  construction rather than by remembering to stop.
 //
-//  Tracks hand over rather than cut. A 20 Hz timer runs only while something is
-//  sounding; it walks one crossfade ramp and, in shuffle, starts the next track
-//  a fade-length before the current one runs out. Two `AVAudioPlayer`s exist at
-//  once for that fade and no longer.
+//  Tracks hand over rather than cut, and that ramp is the only CPU this file
+//  spends — decoding is the hardware's job, a repeating timer is not. So the
+//  timer runs at the fine rate only while a fade is actually in flight, drops
+//  to a slow watch rate between tracks, and halves both again on a warm phone
+//  or in Low Power Mode. Two `AVAudioPlayer`s exist at once for a fade and no
+//  longer.
 //
 
 import AVFoundation
-import UIKit
+import Foundation
 
 // MARK: - Selection
 
-/// What the music system has been asked to do.
+/// What the music system has been asked to play for a match.
 ///
-/// Persisted in `SettingsStore`, so the cases are the vocabulary the Settings
-/// list is built from as well as the player's own state.
+/// Persisted in `SettingsStore`, so the cases are also the vocabulary the
+/// pre-game chooser is built from.
 enum MusicSelection: Hashable, Codable {
 
-    /// No music at all. The default, and what an empty library falls back to.
+    /// No music at all.
     case off
 
     /// Draw a different track each time one ends.
@@ -53,17 +60,19 @@ final class MusicPlayer {
 
     /// The app's one player.
     ///
-    /// A singleton rather than an injected object because music outlives every
-    /// screen: it has to keep playing across navigation, and the choice that
-    /// starts it is settled in `SettingsStore`, which is not a view.
+    /// A singleton because `AVAudioSession` is process-wide and two players
+    /// would be two owners of one session — emphatically *not* so that music
+    /// can outlive a screen. The only thing that ever starts it is
+    /// `startMatch`, and the only caller of that is the board.
     static let shared = MusicPlayer()
 
-    /// The tracks this player can draw from. Views read it to build the list.
+    /// The tracks this player can draw from. The pre-game screen reads it to
+    /// build its list.
     let library: MusicLibrary
 
     init(library: MusicLibrary = MusicLibrary()) {
         self.library = library
-        observeSystemAudio()
+        observeInterruptions()
     }
 
     /// `shared` never dies, but an injected player — a preview, a test — does,
@@ -77,8 +86,7 @@ final class MusicPlayer {
 
     // MARK: Observable state
 
-    /// What was last asked for. Changed only through `apply(selection:volume:)`
-    /// so the persisted setting stays the single source of truth.
+    /// What the current match asked for. Changed only through `startMatch`.
     private(set) var selection: MusicSelection = .off
 
     /// Output level, 0...1.
@@ -87,22 +95,12 @@ final class MusicPlayer {
     /// The track currently sounding, or `nil` when silent.
     private(set) var nowPlaying: MusicTrack?
 
-    /// Why the player is quiet while a track is still chosen, or `nil` when it
-    /// is not being held back. Settings shows a line for `.otherAudio` so the
-    /// silence does not read as a bug.
-    private(set) var suspension: SuspensionReason?
-
-    /// Why playback is being held.
-    enum SuspensionReason: Hashable {
-        /// The device is playing the owner's own audio.
-        case otherAudio
-
-        /// The app is in the background, where an `.ambient` session is silent.
-        case background
-
-        /// A call or another interruption took the session.
-        case interruption
-    }
+    /// Whether a match owns the player right now.
+    ///
+    /// This is the gate every path that could make noise passes through, so a
+    /// stray notification arriving after the board has gone can never start the
+    /// soundtrack up again on the menu.
+    private(set) var isMatchRunning = false
 
     var isPlaying: Bool { current?.isPlaying == true }
 
@@ -117,7 +115,17 @@ final class MusicPlayer {
     /// `current` is simply at `volume`.
     @ObservationIgnored private var fadeProgress: Double = 1
 
+    /// Whether a call or another interruption has the session. Not observable:
+    /// no screen shows it, because a match that is interrupted is a match
+    /// nobody is looking at.
+    @ObservationIgnored private var isInterrupted = false
+
     @ObservationIgnored private var ticker: Timer?
+
+    /// The rate `ticker` was built at, so `syncTicker` can tell a timer that is
+    /// already correct from one that has to be replaced — and so the ramp maths
+    /// steps by the interval actually in use rather than a nominal one.
+    @ObservationIgnored private var tickerInterval: TimeInterval = 0
 
     @ObservationIgnored private var isSessionActive = false
 
@@ -128,118 +136,89 @@ final class MusicPlayer {
     /// the two tracks are not audibly fighting.
     private static let crossfadeDuration: TimeInterval = 1.5
 
-    /// 20 Hz. Fine enough that a 1.5s ramp is inaudibly stepped, coarse enough
-    /// that the timer costs nothing beside a frame of SwiftUI.
-    private static let tickInterval: TimeInterval = 1.0 / 20.0
-
     // MARK: - Commands
 
-    /// Adopts a choice and a level, starting, swapping or stopping as needed.
+    /// Starts the soundtrack for a match that has just come on screen.
     ///
-    /// The one entry point, and idempotent: re-applying the selection that is
-    /// already playing only moves the volume, so a slider drag never restarts a
-    /// track and `SettingsStore` can call this on every change it saves.
-    func apply(selection newSelection: MusicSelection, volume newVolume: Double) {
-        let selectionChanged = newSelection != selection
+    /// The board calls this on appear and again when the app returns to the
+    /// foreground, so it has to be safe to call twice: a second call naming the
+    /// selection already running only moves the level. It deliberately does not
+    /// clear an interruption — a phone call is lifted by the session's own
+    /// `.ended` notification, not by the scene becoming active while the call
+    /// is still up.
+    func startMatch(selection newSelection: MusicSelection, volume newVolume: Double) {
+        let wasAlreadyRunning = isMatchRunning && newSelection == selection
+
+        isMatchRunning = true
         selection = newSelection
         volume = min(max(newVolume, 0), 1)
 
-        guard selectionChanged else {
+        guard !wasAlreadyRunning else {
             applyVolumeToPlayers()
             return
         }
 
-        switch newSelection {
-        case .off:
-            fadeOutAndStop()
+        isInterrupted = false
+        startSelected()
+    }
 
-        case .shuffle:
-            // Already sounding: let the track finish and shuffle on from there,
-            // rather than cutting off what is playing to prove the mode changed.
-            if let current {
-                current.numberOfLoops = 0
-                applyVolumeToPlayers()
-                startTicking()
-            } else {
-                startSelected()
-            }
-
-        case .track(let id):
-            if nowPlaying?.id == id, let current {
-                current.numberOfLoops = -1
-                applyVolumeToPlayers()
-            } else {
-                startSelected()
-            }
-        }
+    /// Ends the soundtrack: the board has gone, or the app has.
+    ///
+    /// Silence is immediate rather than faded, on purpose. A ramp needs a run
+    /// loop, and both callers are moments where the run loop is about to stop
+    /// being ours — a screen being torn down, or the app leaving the foreground
+    /// — so a fade would either be cut off partway or trail audibly onto the
+    /// menu, which is precisely the thing this rewrite exists to prevent.
+    func stopMatch() {
+        isMatchRunning = false
+        isInterrupted = false
+        finishStopping()
     }
 
     /// Moves the level without touching the choice.
     ///
-    /// Separate from `apply` because a slider wants to be heard while it is
-    /// being dragged, and the value is only worth writing to disk on release.
+    /// Separate from `startMatch` because a slider wants to be heard while it
+    /// is being dragged, and the value is only worth writing to disk on
+    /// release. Harmless while nothing is playing: it sets the level the next
+    /// match will start at.
     func setVolume(_ newVolume: Double) {
         volume = min(max(newVolume, 0), 1)
         applyVolumeToPlayers()
     }
 
-    /// Re-reads the folders and reconciles what is playing with what is there.
+    /// Re-reads the folders and reconciles a running match with what is left.
     ///
-    /// Files can appear while the app is running, which is the whole point of
-    /// the owner's Music folder, so this is what the Rescan button calls: a
-    /// chosen track that has gone away falls silent, and shuffle that had
-    /// nothing to play picks up the new files.
+    /// The pre-game screen calls this every time it appears, so a file dropped
+    /// into the owner's Music folder joins the list without a rebuild and
+    /// without a Rescan button. A chosen track that has gone away falls silent
+    /// rather than being replaced by something the player did not pick.
     func refreshLibrary() {
         library.refresh()
 
-        switch selection {
-        case .off:
-            break
+        guard isMatchRunning,
+              case .track(let id) = selection,
+              library.track(id: id) == nil
+        else { return }
 
-        case .shuffle:
-            if current == nil, suspension == nil { startSelected() }
-
-        case .track(let id):
-            if library.track(id: id) == nil {
-                fadeOutAndStop()
-            } else if current == nil, suspension == nil {
-                startSelected()
-            }
-        }
+        finishStopping()
     }
 
     // MARK: - Starting and stopping
 
     /// Begins whatever `selection` asks for, from silence.
-    ///
-    /// The session is opened before the check rather than after, for two
-    /// reasons: an `.ambient` mixing session takes nothing from anybody by
-    /// existing, and the secondary-audio hint that says when the owner's own
-    /// audio stops is only delivered to a session that is already active. So
-    /// standing aside here still leaves the player able to hear that it may
-    /// come back.
     private func startSelected() {
-        guard selection != .off else {
-            fadeOutAndStop()
-            return
-        }
-        activateSession()
-
-        guard !AVAudioSession.sharedInstance().isOtherAudioPlaying else {
-            suspension = .otherAudio
-            return
-        }
-
         switch selection {
         case .off:
-            fadeOutAndStop()
+            finishStopping()
+
         case .shuffle:
             advanceShuffle()
+
         case .track(let id):
             if let track = library.track(id: id) {
                 crossfade(to: track, looping: true)
             } else {
-                fadeOutAndStop()
+                finishStopping()
             }
         }
     }
@@ -247,9 +226,12 @@ final class MusicPlayer {
     /// Brings `track` in while whatever is playing goes out.
     ///
     /// Returns `false` for a file that will not open, which is what lets
-    /// shuffle step over a corrupt track instead of stalling on it.
+    /// shuffle step over a corrupt track instead of stalling on it. The
+    /// `isMatchRunning` guard is the one that makes "no music outside the
+    /// board" a property of the class rather than a promise its callers keep.
     @discardableResult
     private func crossfade(to track: MusicTrack, looping: Bool) -> Bool {
+        guard isMatchRunning else { return false }
         guard let player = try? AVAudioPlayer(contentsOf: track.url) else { return false }
         player.numberOfLoops = looping ? -1 : 0
         player.volume = 0
@@ -268,8 +250,7 @@ final class MusicPlayer {
         current = player
         nowPlaying = track
         fadeProgress = 0
-        suspension = nil
-        startTicking()
+        syncTicker()
         return true
     }
 
@@ -282,24 +263,10 @@ final class MusicPlayer {
             if crossfade(to: next, looping: repeatsItself) { return }
             skipping.insert(next.id)
         }
-        fadeOutAndStop()
+        finishStopping()
     }
 
-    /// Rides the current track down to silence and releases the session.
-    private func fadeOutAndStop() {
-        previous?.stop()
-        previous = current
-        current = nil
-        nowPlaying = nil
-        fadeProgress = 0
-
-        if previous == nil {
-            finishStopping()
-        } else {
-            startTicking()
-        }
-    }
-
+    /// Cuts everything, forgets the track, and hands the session back.
     private func finishStopping() {
         previous?.stop()
         previous = nil
@@ -307,26 +274,91 @@ final class MusicPlayer {
         current = nil
         nowPlaying = nil
         fadeProgress = 1
-        suspension = nil
-        stopTicking()
+        syncTicker()
         deactivateSessionIfIdle()
     }
 
     // MARK: - The ramp
 
-    private func startTicking() {
-        guard ticker == nil else { return }
-        let timer = Timer(timeInterval: Self.tickInterval, repeats: true) { [weak self] _ in
+    /// The fine step rate, used only while a fade is actually in flight. 20 Hz
+    /// is fine enough that a 1.5s ramp is inaudibly stepped.
+    private static let rampTick: TimeInterval = 1.0 / 20.0
+
+    /// The same ramp on a phone that has asked for less. Half the wakeups, and
+    /// a 15-step fade is still smooth enough not to read as a staircase.
+    private static let easedRampTick: TimeInterval = 1.0 / 10.0
+
+    /// Between fades, only shuffle needs a timer at all — and all it is doing
+    /// is watching for the end of a track, which four looks a second answers
+    /// with room to spare. A chosen track loops inside `AVAudioPlayer` and
+    /// needs no timer whatsoever.
+    private static let watchTick: TimeInterval = 0.25
+
+    /// The watch rate on a warm or conserving phone. Still well inside the
+    /// crossfade's own lead, so a handover started late is a shorter overlap
+    /// rather than a missed one.
+    private static let easedWatchTick: TimeInterval = 0.5
+
+    /// What the timer needs to be doing right now, or `nil` for "nothing".
+    ///
+    /// This is the whole thermal story for the audio subsystem. Playing a file
+    /// is hardware-assisted and costs nothing worth governing; a repeating main
+    /// run-loop timer is the only thing here that keeps the CPU awake, so the
+    /// timer is what degrades. `SearchBudget` draws its warm/cool line at
+    /// `.serious` for the same reason — that is where the OS starts throttling
+    /// clocks — and this file uses the same line so the two never disagree
+    /// about what "the phone is warm" means.
+    private var neededTickInterval: TimeInterval? {
+        guard !isInterrupted else { return nil }
+
+        let conditions = DeviceConditions.current
+        let isEased = conditions.isLowPowerModeEnabled || Self.isWarm(conditions.thermalState)
+
+        if fadeProgress < 1 || previous != nil {
+            return isEased ? Self.easedRampTick : Self.rampTick
+        }
+        if case .shuffle = selection, current != nil {
+            return isEased ? Self.easedWatchTick : Self.watchTick
+        }
+        return nil
+    }
+
+    private static func isWarm(_ state: ProcessInfo.ThermalState) -> Bool {
+        switch state {
+        case .nominal, .fair:
+            return false
+        case .serious, .critical:
+            return true
+        @unknown default:
+            // A rung Apple adds later is by definition not nominal.
+            return true
+        }
+    }
+
+    /// Brings the timer into line with what the player is doing: builds one,
+    /// re-rates one, or takes it away. Called after every state change, so
+    /// "is a timer running, and how fast" is answered in exactly one place.
+    private func syncTicker() {
+        guard let interval = neededTickInterval else {
+            stopTicking()
+            return
+        }
+        guard ticker == nil || tickerInterval != interval else { return }
+
+        stopTicking()
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.tick()
         }
         // `.common` so a scrolling list cannot stall a fade mid-ramp.
         RunLoop.main.add(timer, forMode: .common)
         ticker = timer
+        tickerInterval = interval
     }
 
     private func stopTicking() {
         ticker?.invalidate()
         ticker = nil
+        tickerInterval = 0
     }
 
     private func tick() {
@@ -334,16 +366,19 @@ final class MusicPlayer {
 
         // Only shuffle has to watch for the end of a track: a chosen track
         // loops inside `AVAudioPlayer` and never reaches one.
-        if suspension == nil, case .shuffle = selection, let current, hasReachedHandover(current) {
+        if case .shuffle = selection, let current, hasReachedHandover(current) {
+            // `advanceShuffle` re-syncs the timer whichever way it goes.
             advanceShuffle()
             return
         }
-        stopTickingIfIdle()
+        syncTicker()
     }
 
+    /// Advances the ramp by one step of whatever rate the timer is actually
+    /// running at, so an eased tick makes the fade coarser rather than longer.
     private func stepCrossfade() {
-        guard fadeProgress < 1 else { return }
-        fadeProgress = min(1, fadeProgress + Self.tickInterval / Self.crossfadeDuration)
+        guard fadeProgress < 1, tickerInterval > 0 else { return }
+        fadeProgress = min(1, fadeProgress + tickerInterval / Self.crossfadeDuration)
         applyVolumeToPlayers()
 
         guard fadeProgress >= 1 else { return }
@@ -361,30 +396,27 @@ final class MusicPlayer {
     ///
     /// The handover starts a fade-length early so the two overlap. A track
     /// shorter than a few fades gets no lead at all — overlapping most of a
-    /// sting would just sound like a mistake — so it is swapped as it ends.
+    /// sting would just sound like a mistake — so it is swapped as it ends. The
+    /// tolerance is the live tick interval, so a slowed watch rate still
+    /// catches the end rather than sailing past it.
     private func hasReachedHandover(_ player: AVAudioPlayer) -> Bool {
         guard player.isPlaying else { return true }
         let lead = player.duration > Self.crossfadeDuration * 3 ? Self.crossfadeDuration : 0
-        return player.currentTime >= player.duration - lead - Self.tickInterval
-    }
-
-    /// Stops the timer once there is nothing left for it to do — a finished
-    /// ramp on a looping track, or silence.
-    private func stopTickingIfIdle() {
-        guard fadeProgress >= 1, previous == nil else { return }
-        if case .shuffle = selection, current != nil, suspension == nil { return }
-        stopTicking()
+        return player.currentTime >= player.duration - lead - tickerInterval
     }
 
     // MARK: - Session
 
-    /// `.ambient` with `.mixWithOthers`: obeys the ring switch, never
-    /// interrupts another app, and goes quiet in the background by itself.
+    /// `.playback`: heard through the ring/silent switch, and not mixed.
+    ///
+    /// The absence of `.mixWithOthers` is the point rather than an oversight.
+    /// The four bundled tracks *are* this game's audio, and a match the player
+    /// started should be the thing they hear.
     private func activateSession() {
         guard !isSessionActive else { return }
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.ambient, mode: .default, options: [.mixWithOthers])
+            try session.setCategory(.playback, mode: .default)
             try session.setActive(true)
             isSessionActive = true
         } catch {
@@ -395,101 +427,66 @@ final class MusicPlayer {
         }
     }
 
+    /// Handing the session back matters more under `.playback` than it did
+    /// under `.ambient`. This category interrupts other apps, so leaving the
+    /// board has to tell whoever was interrupted that they may carry on — which
+    /// is what `.notifyOthersOnDeactivation` is for.
     private func deactivateSessionIfIdle() {
         guard isSessionActive, current == nil, previous == nil else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         isSessionActive = false
     }
 
-    // MARK: - Yielding
+    // MARK: - Interruptions
 
-    /// Watches the three things that should take the music away and give it
-    /// back: the owner's own audio, an interruption, and the background.
-    private func observeSystemAudio() {
-        let center = NotificationCenter.default
-
-        observers.append(center.addObserver(
-            forName: AVAudioSession.silenceSecondaryAudioHintNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main
-        ) { [weak self] note in
-            let raw = note.userInfo?[AVAudioSessionSilenceSecondaryAudioHintTypeKey] as? UInt
-            let type = raw.flatMap(AVAudioSession.SilenceSecondaryAudioHintType.init(rawValue:))
-            if type == .begin {
-                self?.suspend(for: .otherAudio)
-            } else {
-                self?.resume(from: .otherAudio)
-            }
-        })
-
-        observers.append(center.addObserver(
+    /// A phone call, an alarm, Siri: the one thing that is allowed to take the
+    /// audio away, and the one thing that gives it back.
+    ///
+    /// This is the only observer the player keeps. Backgrounding is handled by
+    /// the board's scene phase instead, because the board is what owns the
+    /// match — a notification observer here could only ever guess at whether
+    /// there was a game to come back to.
+    private func observeInterruptions() {
+        observers.append(NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-            let type = raw.flatMap(AVAudioSession.InterruptionType.init(rawValue:))
-            if type == .began {
-                self?.suspend(for: .interruption)
-            } else {
-                self?.resume(from: .interruption)
+            switch raw.flatMap(AVAudioSession.InterruptionType.init(rawValue:)) {
+            case .began: self?.handleInterruptionBegan()
+            case .ended: self?.handleInterruptionEnded()
+            default:     break
             }
         })
-
-        observers.append(center.addObserver(
-            forName: UIApplication.didEnterBackgroundNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.suspend(for: .background)
-        })
-
-        observers.append(center.addObserver(
-            forName: UIApplication.willEnterForegroundNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.resume(from: .background)
-        })
     }
 
-    private func suspend(for reason: SuspensionReason) {
+    private func handleInterruptionBegan() {
         guard current != nil || previous != nil else { return }
-        suspension = reason
+        isInterrupted = true
         current?.pause()
         previous?.pause()
-        stopTicking()
+        syncTicker()
     }
 
-    /// Picks playback back up, unless something else is still holding it.
+    /// Picks playback back up where the call left it.
     ///
-    /// Only the reason that caused the pause may lift it, so returning from the
-    /// background does not talk over music the owner started in the meantime —
-    /// and the other-audio check is repeated here because two reasons can
-    /// overlap and only one is remembered.
-    private func resume(from reason: SuspensionReason) {
-        guard suspension == reason else { return }
-        guard selection != .off else {
-            suspension = nil
-            return
-        }
-        if AVAudioSession.sharedInstance().isOtherAudioPlaying {
-            suspension = .otherAudio
-            return
-        }
+    /// The gate is "a match still owns paused players", not the `.shouldResume`
+    /// option: that flag is advisory, and a soundtrack that stayed silent for
+    /// the rest of a game because the OS omitted it would be the same class of
+    /// bug this file was rewritten to remove. The session itself was taken
+    /// away, so it is claimed again before the players are asked to sound. If
+    /// the board has gone in the meantime, `isMatchRunning` is false and
+    /// nothing restarts.
+    private func handleInterruptionEnded() {
+        isInterrupted = false
 
-        suspension = nil
+        guard isMatchRunning, current != nil || previous != nil else { return }
 
-        // Nothing was ever started — the owner turned music on while their own
-        // audio held the device — so this is a first start, not a resume.
-        guard current != nil || previous != nil else {
-            startSelected()
-            return
-        }
-
+        isSessionActive = false
         activateSession()
         current?.play()
         previous?.play()
-        startTicking()
+        syncTicker()
     }
 }

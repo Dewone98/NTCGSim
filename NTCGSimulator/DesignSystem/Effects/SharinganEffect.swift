@@ -7,36 +7,56 @@
 //  copies of one `Path`, and the whole thing scales to any size because nothing
 //  in it is a pixel.
 //
-//  Two pieces of maths hold it up.
+//  Three pieces of maths hold it up.
 //
 //  Placement is parametric-on-a-circle: tomoe *i* sits at angle
 //  `theta + i * 2pi / count` on a shared orbit of radius `orbit * irisRadius`,
 //  at `centre + R * (cos, sin)`. Count and radius are therefore knobs, not a
 //  rewrite — three is canon, but the geometry has no opinion.
 //
-//  The spin is a *trapezoidal angular-velocity profile*: omega ramps from 0 to
-//  its peak, holds, then falls back to 0. The angle is the integral of that
-//  profile, worked out in closed form per phase (see `SharinganSpin`) rather
-//  than accumulated as `theta += omega * dt` across frames — an accumulator
-//  drifts with frame rate, cannot be scrubbed to an arbitrary instant, and
-//  makes the still-frame previews impossible. A constant spin would read as a
-//  loading indicator; starting fast and settling is what makes it read as an
-//  eye that just woke up.
+//  Orientation is derived from that placement rather than asserted next to it.
+//  A tomoe is a comet: the round head leads and the tapering tail trails. Which
+//  way "leads" points is not a matter of taste, it is the derivative of the
+//  placement — so `TomoePath.heading(at:)` differentiates the orbit and
+//  `TomoePath.facing(at:)` turns that into the shape's own rotation. Nothing in
+//  this file writes a bare angle into a transform, because a bare angle is how
+//  a tomoe ends up 180 degrees out and nobody can see from the code that it is.
 //
-//  Reduce Motion keeps the eye, the colour and the fade, and drops the spin and
-//  the pulse: the board still shows whose ability just went off, and nothing
-//  rotates or throbs. Low Power Mode takes the identical exit, because a spin
-//  the player did not ask for is a poor use of a battery the phone is trying to
-//  save.
+//  The spin is genuine angular ACCELERATION, not an eased position. Omega
+//  starts at a walking pace and climbs linearly — `omega(t) = omega0 + alpha t`
+//  — and the angle is its integral, `omega0 t + alpha t^2 / 2`, in closed form
+//  rather than accumulated as `theta += omega * dt` across frames. An
+//  accumulator drifts with frame rate, cannot be scrubbed to an arbitrary
+//  instant, and makes the still-frame previews impossible. The old profile
+//  ramped up, held and eased out, which reads as a machine reaching its set
+//  speed; a speed that never stops building reads as something winding up, and
+//  it is the build that the reference is actually made of.
+//
+//  Building speed costs legibility, so the commas grow a motion trail: ghosts
+//  of each tomoe laid back along the arc it has just travelled, at decaying
+//  opacity. The trail is derived from omega, not from the clock, so it is
+//  absent at the start, appears as the eye winds up, and at full speed smears
+//  the three commas into one continuous ring. It is also what makes the comet
+//  convention *visible* — a lone comma on a still iris is ambiguous, a comma
+//  with its own wake is not.
+//
+//  Everything is bounded. Omega has a ceiling, the trail has a maximum arc (one
+//  tomoe spacing, so a ghost can never overtake the next comma) and a maximum
+//  sample count, and that count falls again as the device heats up. Reduce
+//  Motion keeps the eye, the colour and the fade, and drops the spin, the trail
+//  and the pulse: the board still shows whose ability just went off, and
+//  nothing rotates or throbs. Low Power Mode takes the identical exit, because
+//  a spin the player did not ask for is a poor use of a battery the phone is
+//  trying to save. On both paths omega is zero, so the trail costs nothing to
+//  switch off — it simply is not there.
 //
 //  Nothing here blurs and nothing here casts a shadow — the softness is all
 //  radial gradients, which the GPU draws in one pass instead of sampling a
 //  surface twice. What the eye *did* cost was repetition: iris, fibres, rim and
 //  pupil are identical in every frame of the effect, and they were redrawn
 //  alongside the tomoe on each one. They are a separate, `Equatable` plate now,
-//  so they rasterise once and the animated layer is two draws — the comma ring
-//  and the catchlight over it. The spin then rides on a `scaleEffect` and a
-//  transform, which are the cheap properties.
+//  so they rasterise once and the animated layer is the comma ring, its ghosts
+//  and the catchlight over them.
 //
 
 import SwiftUI
@@ -76,12 +96,17 @@ extension EffectPalette {
 /// How long the eye runs, and the shape of its fade.
 enum SharinganTiming {
 
-    /// Open, spin, settle, close.
+    /// Open, wind up, whip away.
     static let duration: Double = 1.5
 
     /// Fraction of the life spent fading in, and the point the fade-out starts.
+    ///
+    /// The fade-out is late on purpose. The spin never stops accelerating, so
+    /// the fastest, most smeared frames of the effect are its last ones; a
+    /// fade that began at three-quarters would dissolve the eye before the
+    /// smear it has spent the whole play building ever arrived.
     static let fadeIn: Double = 0.12
-    static let fadeOut: Double = 0.76
+    static let fadeOut: Double = 0.82
 
     /// How long the Reduce Motion still eye takes to appear and to leave.
     static let stillFade: Double = 0.24
@@ -89,57 +114,218 @@ enum SharinganTiming {
 
 // MARK: - Spin
 
-/// The angular-velocity profile the tomoe orbit on.
+/// The angular-velocity profile the tomoe orbit on: constant angular
+/// acceleration from a walking start, with a ceiling.
 ///
-/// `omega(t)` is a trapezoid: a linear ramp up over `rampUp`, a flat hold, then
-/// a linear ramp down over `rampDown` — constant deceleration, which is what an
-/// ease-out *is*. Integrating each phase gives the angle in closed form:
+/// The motion is described by its *acceleration* and then integrated, rather
+/// than by easing a position, because "keeps getting faster" is a statement
+/// about `d(omega)/dt` and any position curve that ends flat has, by
+/// definition, stopped accelerating. So:
 ///
-///     phase 1, t < a:      theta = peak * t^2 / 2a
-///     phase 2, a <= t < b: theta = peak * (a/2 + (t - a))
-///     phase 3, t >= b:     theta = theta(b) + peak * ((t-b) - (t-b)^2 / 2c)
+///     alpha(t) = alpha                        constant
+///     omega(t) = min(omega0 + alpha t, cap)   the integral of alpha
+///     theta(t) = omega0 t + alpha t^2 / 2     the integral of omega
 ///
-/// with `b = 1 - c`. The total sweep is `peak * (1 - a/2 - c/2)`, so `peak` is
-/// solved backwards from the number of revolutions asked for — the caller says
-/// how far it turns, not how fast, because "two and a bit turns" is a thing you
-/// can art-direct and "eleven radians a second" is not.
+/// with `t` normalised to 0...1 across the effect's life and angles in radians.
+/// Past the cap — if it is ever reached — omega is flat and theta continues
+/// linearly from wherever it had got to, which keeps `angle(at:)` continuous
+/// across the join instead of stepping.
+///
+/// `alpha` is solved backwards from the turns asked for, because "three and a
+/// bit turns" is a thing that can be art-directed and "thirty-six radians per
+/// unit time squared" is not. Integrating the uncapped profile over the full
+/// life gives `theta(1) = omega0 + alpha / 2`, so
+/// `alpha = 2 * (2pi * revolutions - omega0)`.
+///
+/// Everything clamps to non-negative. That is not defensive tidying: the tomoe
+/// are oriented from the *direction* of travel, and a negative omega would turn
+/// every comma tail-first without anything in the drawing code looking wrong.
+/// The ring turns one way, forever, and this is where that is enforced.
 struct SharinganSpin: Equatable {
 
-    /// Total turns over the life of the effect.
-    var revolutions: Double = 2.4
+    /// How fast the ring is already turning at the instant the eye opens, in
+    /// turns per unit of normalised time. Not zero: an eye that starts from a
+    /// dead stop spends its first fifth of a second looking like a sticker.
+    var initialTurnRate: Double = 0.35
 
-    /// Fraction of the life spent getting up to speed. Short: the eye snaps on.
-    var rampUp: Double = 0.16
+    /// Turns completed over the life of the effect, if the cap never engages.
+    /// At the default profile it does not — see `maxAngularVelocity`.
+    var revolutions: Double = 3.2
 
-    /// Fraction spent slowing down. Long, because the settle is the part that
-    /// reads as deliberate rather than mechanical.
-    var rampDown: Double = 0.44
+    /// The ceiling on angular velocity, in radians per unit of normalised time.
+    ///
+    /// A true safety rail rather than part of the art direction: the default
+    /// profile peaks at about 38, so the cap is never reached by anything that
+    /// ships and the motion the player sees is pure acceleration all the way to
+    /// the end. It exists because `revolutions` is a knob, and a knob wired to
+    /// an angular velocity wants a stop on it — both so the trail's arc stays
+    /// bounded (it is `omega * persistence`) and because past a few turns a
+    /// second the ring stops being three commas and becomes a grey annulus.
+    static let maxAngularVelocity: Double = 44
 
-    /// Peak angular velocity, in radians per unit of normalised time.
-    var peak: Double {
-        let a = min(max(rampUp, 0), 1)
-        let c = min(max(rampDown, 0), 1 - a)
-        let area = max(0.05, 1 - a / 2 - c / 2)
-        return revolutions * 2 * .pi / area
+    /// Angular velocity at `t = 0`, in radians per unit of normalised time.
+    var initialVelocity: Double { 2 * .pi * max(0, initialTurnRate) }
+
+    /// The constant angular acceleration, solved from the turns asked for.
+    ///
+    /// Clamped at zero so a `revolutions` set below what the starting rate
+    /// already delivers coasts rather than braking — this profile accelerates
+    /// or holds, and never decelerates.
+    var acceleration: Double {
+        max(0, 2 * (2 * .pi * max(0, revolutions) - initialVelocity))
     }
 
-    /// The angle turned by time `t`, where `t` is 0...1 across the effect.
+    /// The instant omega meets the ceiling, or `infinity` if it never does.
+    var saturationTime: Double {
+        guard acceleration > 0 else { return .infinity }
+        return max(0, (Self.maxAngularVelocity - initialVelocity) / acceleration)
+    }
+
+    /// Angular velocity at time `t`, where `t` is 0...1 across the effect.
+    func velocity(at t: Double) -> Double {
+        let clamped = min(max(t, 0), 1)
+        return min(initialVelocity + acceleration * clamped, Self.maxAngularVelocity)
+    }
+
+    /// The angle turned by time `t` — the integral of `velocity(at:)`.
     func angle(at t: Double) -> Double {
         let clamped = min(max(t, 0), 1)
-        let a = max(0.0001, min(max(rampUp, 0), 1))
-        let c = max(0.0001, min(max(rampDown, 0), 1 - a))
-        let b = 1 - c
-        let omega = peak
+        let cap = saturationTime
 
-        if clamped < a {
-            return omega * clamped * clamped / (2 * a)
+        // Before the ceiling: the plain quadratic.
+        if clamped <= cap {
+            return initialVelocity * clamped + acceleration * clamped * clamped / 2
         }
-        let upSweep = omega * a / 2
-        if clamped < b {
-            return upSweep + omega * (clamped - a)
+
+        // After it: whatever had been turned by then, plus a constant rate.
+        let atCap = initialVelocity * cap + acceleration * cap * cap / 2
+        return atCap + Self.maxAngularVelocity * (clamped - cap)
+    }
+}
+
+// MARK: - Motion trail
+
+/// The smear that appears as the ring winds up: how far back it reaches, how
+/// many ghosts it is made of, and how strongly it registers.
+///
+/// Derived from omega rather than from the clock, which is what makes it a
+/// *motion* trail and not a timed flourish — it is absent while the eye is
+/// slow, grows as the eye accelerates, and is simply not there at all on the
+/// Reduce Motion and Low Power paths, where omega is zero.
+///
+/// The arc is `omega * persistence`: a persistence-of-vision window, the same
+/// reasoning as a camera's shutter angle. Everything about it is bounded, and
+/// the two bounds do different jobs — `maxArc` is about legibility, `maxSamples`
+/// about cost.
+struct SharinganTrail: Equatable {
+
+    /// How far back along the orbit the smear reaches, in radians.
+    var arc: Double
+
+    /// How many ghosts that arc is drawn with.
+    var samples: Int
+
+    /// How strongly the whole trail registers, 0...1 — the fade-in that keeps
+    /// the first ghost from popping into existence at the onset speed.
+    var strength: Double
+
+    // MARK: Tuning
+
+    /// Angular velocity below which there is no trail at all, and the velocity
+    /// at which it is at full strength, in radians per unit of normalised time.
+    ///
+    /// With the default spin the onset lands about a quarter of the way in, so
+    /// the eye is unmistakably a set of three commas before it is ever a smear.
+    static let onsetVelocity: Double = 12
+    static let fullVelocity: Double = 20
+
+    /// The persistence-of-vision window, in units of normalised time.
+    ///
+    /// Chosen against the default profile: peak omega is about 38, and
+    /// `38 * 0.055` is a hair under `2pi / 3`, so at the very fastest frame the
+    /// smear reaches almost exactly the next comma's position and the three
+    /// tomoe close into one continuous ring — which is the pattern the whole
+    /// acceleration is building towards.
+    static let persistence: Double = 0.055
+
+    /// How much arc each ghost is worth. Below about this spacing successive
+    /// ghosts land on top of each other and cost a draw to change nothing.
+    static let radiansPerSample: Double = 0.42
+
+    /// The most ghosts the trail is ever drawn with.
+    ///
+    /// Five is the ceiling on an already-bounded number: the arc caps at one
+    /// tomoe spacing and each ghost is worth `radiansPerSample` of it, so at
+    /// three tomoe the arithmetic asks for five and gets five. It is written
+    /// down anyway because `tomoeCount` is a knob, and at twelve tomoe the
+    /// spacing is small but the *count* of paths in a frame is what matters,
+    /// and that is `(samples + 1) * tomoeCount`.
+    static let maxSamples = 5
+
+    /// How fast the ghosts fade back along the arc, and how solid the nearest
+    /// one is allowed to be.
+    ///
+    /// The exponent is above 1 so the fall is steepest nearest the comma: a
+    /// linear ramp leaves the far ghosts too readable and the ring counts as
+    /// eight commas rather than three with a wake. The peak keeps even the
+    /// closest ghost visibly lighter than the comma casting it, for the same
+    /// reason.
+    static let falloff: Double = 1.6
+    static let peakOpacity: Double = 0.55
+
+    // MARK: Resolution
+
+    /// The trail for a given angular velocity, or `nil` for no trail at all.
+    ///
+    /// `ceiling` is the device's own budget — see `ceiling(for:)` — and a
+    /// ceiling of zero is a complete answer, not a degenerate one: the ring
+    /// still turns, it simply stops leaving a wake.
+    static func resolve(velocity: Double, tomoeCount: Int, ceiling: Int) -> SharinganTrail? {
+        guard ceiling > 0, velocity > onsetVelocity else { return nil }
+
+        let count = min(max(1, tomoeCount), SharinganGeometry.maxTomoeCount)
+        let spacing = 2 * .pi / Double(count)
+        let arc = min(velocity * persistence, spacing)
+        guard arc > 0 else { return nil }
+
+        let wanted = Int((arc / radiansPerSample).rounded())
+        let samples = min(max(1, wanted), min(maxSamples, ceiling))
+
+        return SharinganTrail(
+            arc: arc,
+            samples: samples,
+            strength: Curve.smoothstep(onsetVelocity, fullVelocity, velocity)
+        )
+    }
+
+    /// How much trail the device can afford right now.
+    ///
+    /// The thermal ladder is the same one the AI's search budget answers to, so
+    /// a phone that is getting warm loses the expensive half of this effect at
+    /// the same moment it loses search depth, rather than each subsystem
+    /// discovering the heat separately. Critical means no ghosts at all: the
+    /// eye is then exactly as cheap as it was before the trail existed.
+    static func ceiling(for thermal: ProcessInfo.ThermalState) -> Int {
+        switch thermal {
+        case .nominal: return maxSamples
+        case .fair: return 4
+        case .serious: return 2
+        case .critical: return 0
+        @unknown default: return 2
         }
-        let tail = clamped - b
-        return upSweep + omega * (b - a) + omega * (tail - tail * tail / (2 * c))
+    }
+
+    /// The angle and opacity of ghost `index`, counting 1 as the one nearest
+    /// the comma and `samples` as the furthest back.
+    ///
+    /// Ghosts lie *behind* the comma, so the offset is subtracted from the
+    /// ring's angle — "behind" being the negative heading direction, which is
+    /// the same sign convention the tail itself is built on.
+    func ghost(_ index: Int, ringAngle: Double) -> (angle: Double, opacity: Double) {
+        let steps = max(1, samples)
+        let back = arc * Double(index) / Double(steps)
+        let remaining = Double(steps + 1 - index) / Double(steps + 1)
+        return (ringAngle - back, strength * Self.peakOpacity * pow(remaining, Self.falloff))
     }
 }
 
@@ -163,7 +349,9 @@ struct SharinganGeometry: Equatable {
     ///
     /// Twelve is already a daisy rather than an eye, so this is a guard on
     /// arithmetic rather than an art direction: the count is a knob, and a knob
-    /// wired to a loop inside a draw call wants a stop on it.
+    /// wired to a loop inside a draw call wants a stop on it. It bounds the
+    /// trail too — a frame draws at most `(maxSamples + 1) * maxTomoeCount`
+    /// commas, which is 72, once, at the hottest instant of the fastest spin.
     static let maxTomoeCount = 12
 
     /// Orbit radius, as a fraction of the iris radius.
@@ -184,7 +372,7 @@ struct SharinganGeometry: Equatable {
     /// A quadratic's midpoint sits at `(P0 + 2C + P2) / 4`, so shifting both
     /// control points by `curl` bows the tail's centreline by `curl / 2`. The
     /// tail follows the orbit when that bow matches the orbit's sagitta over
-    /// the same chord, `L^2 / 8R` — at these defaults, about 0.2 head radii,
+    /// the same chord, `L^2 / 8R` — at these defaults, about 0.26 head radii,
     /// which is why the setting is a little over it: enough to read as a hook
     /// rather than as a bent stick.
     var tailCurl: CGFloat = 0.85
@@ -223,23 +411,74 @@ struct SharinganGeometry: Equatable {
 
 /// The comma. Built once in a local frame and stamped `tomoeCount` times.
 ///
-/// The local frame is chosen so placement is a single rotation: **+x is
-/// radially outward** from the pupil and **-y is the trailing direction**, so a
-/// tomoe drawn here and rotated by its orbital angle already has its tail
-/// behind it and its curl hooking inward.
+/// ## The convention, in one paragraph
 ///
-/// The outline is one subpath: the head is a full circle by `addArc`, then the
-/// tail leaves the two shoulders — the points where the circle is perpendicular
-/// to the tail — as a pair of quadratic curves meeting at the tip. Both
-/// subpaths are wound the same way (the tail runs shoulder-B to tip to
-/// shoulder-A) so non-zero filling unions them; wound the other way the overlap
-/// cancels and the head comes out with a bite missing.
+/// A tomoe is a comet. The filled round head **leads** and the tapering tail
+/// **trails behind it**, along the arc the comma has just come from — never
+/// ahead of it. That is the whole rule, and everything below exists so it
+/// cannot be got wrong by accident.
+///
+/// ## Which way is forward
+///
+/// Forward is not a matter of taste, it is a derivative. A tomoe at orbital
+/// angle `phi` sits at `centre + R * (cos phi, sin phi)`; differentiating with
+/// respect to `phi` gives its velocity, `R * (-sin phi, cos phi)`, whose angle
+/// is `phi + pi/2`. The ring only ever turns towards increasing `phi` —
+/// `SharinganSpin` clamps omega non-negative precisely so that stays true — so
+/// that tangent *is* the direction of travel. In SwiftUI's y-down space
+/// increasing `phi` reads as clockwise on screen, but the derivation never
+/// needs to know that, which is the point of doing it this way.
+///
+/// ## The local frame
+///
+/// `unit(...)` draws the comma with its head centred on the origin and its tail
+/// running out along **local -y**. So **local +y is the nose**, the heading, the
+/// direction of travel; **local -y is where the tail goes**, because the tail
+/// trails; and **local +x is radially outward** from the pupil, which is what
+/// lets `tailCurl` bow the tail inward along the orbit by pushing toward -x.
+///
+/// `facing(at:)` is then the only place the two meet: it rotates the local nose
+/// onto the heading. No caller writes a bare angle into a transform, so a tomoe
+/// cannot come out 180 degrees round without someone deliberately editing a
+/// documented derivation — which is the failure this arrangement is here to
+/// prevent, because a reversed comma is perfectly plausible-looking on a still
+/// frame and only reads as wrong once it moves.
+///
+/// ## The outline
+///
+/// One subpath: the head is a full circle by `addArc`, then the tail leaves the
+/// two shoulders — the points where the circle is perpendicular to the tail —
+/// as a pair of quadratic curves meeting at the tip. Both subpaths are wound
+/// the same way (the tail runs shoulder-B to tip to shoulder-A) so non-zero
+/// filling unions them; wound the other way the overlap cancels and the head
+/// comes out with a wedge bitten from it.
 enum TomoePath {
+
+    /// The direction of travel of a tomoe at orbital angle `phi`, as an angle.
+    ///
+    /// The tangent to the orbit, `phi + pi/2` — see the type's notes. This is
+    /// the single definition of "forward" in the file.
+    static func heading(at phi: Double) -> Double { phi + .pi / 2 }
+
+    /// The rotation that puts a unit tomoe's nose on its heading.
+    ///
+    /// The unit comma's nose is local +y, which lies at angle `pi/2`. Rotating
+    /// the local frame by `r` carries that axis to `pi/2 + r`, so aligning it
+    /// with `heading(at: phi)` needs `r = heading(at: phi) - pi/2`. That works
+    /// out to `phi` — but it is written as the subtraction rather than as the
+    /// answer, because the answer alone is indistinguishable from `phi + pi`
+    /// to anyone reading it later, and `phi + pi` is exactly the bug.
+    static func facing(at phi: Double) -> Double { heading(at: phi) - .pi / 2 }
 
     /// A tomoe with a head of radius 1 centred on the origin. Scale it to size
     /// with a transform rather than rebuilding it.
+    ///
+    /// The tail is laid out along -y — behind the nose — and the tip is swung
+    /// toward -x, the inward side, by `sweep`.
     static func unit(tailLength: CGFloat, sweep: Double, curl: CGFloat) -> Path {
         let sweepRadians = sweep * .pi / 180
+
+        // Straight back is -y; the sweep swings the tip inward, toward -x.
         let tip = CGPoint(
             x: -tailLength * CGFloat(sin(sweepRadians)),
             y: -tailLength * CGFloat(cos(sweepRadians))
@@ -272,8 +511,9 @@ enum TomoePath {
     /// Every tomoe for one frame, already placed and oriented, as one path.
     ///
     /// Parametric placement: tomoe *i* sits at `angle + i * 2pi / count` on the
-    /// orbit, and is rotated by that same angle — which is what keeps the tails
-    /// tangential however many there are.
+    /// orbit, and is turned by `facing(at:)` of that same angle — which is what
+    /// keeps every head leading and every tail tangential, however many there
+    /// are and wherever the ring has got to.
     static func ring(
         centre: CGPoint,
         irisRadius: CGFloat,
@@ -296,11 +536,11 @@ enum TomoePath {
                 x: centre.x + orbit * CGFloat(cos(phi)),
                 y: centre.y + orbit * CGFloat(sin(phi))
             )
-            // Applied right to left: scale to size, turn to face the orbit,
-            // then move onto it.
+            // Applied right to left: scale to size, turn the nose onto the
+            // heading, then move onto the orbit.
             let transform = CGAffineTransform.identity
                 .translatedBy(x: position.x, y: position.y)
-                .rotated(by: CGFloat(phi))
+                .rotated(by: CGFloat(facing(at: phi)))
                 .scaledBy(x: head, y: head)
             ring.addPath(base.applying(transform))
         }
@@ -386,9 +626,33 @@ struct SharinganFrame: View {
         return 1 + geometry.pulseDepth * CGFloat(cos(phase))
     }
 
+    /// How far round the orbit the commas have turned by now.
     @MainActor
     private var spinAngle: Double {
         isStill ? 0 : geometry.spin.angle(at: progress)
+    }
+
+    /// The smear, if the eye is moving fast enough to have earned one and the
+    /// device is cool enough to pay for it.
+    ///
+    /// The still check comes first so the Reduce Motion and Low Power paths
+    /// never even ask about thermals — a still eye cannot have a motion trail
+    /// no matter how cold the phone is, and the cheap path should be cheap all
+    /// the way down rather than cheap only in what it finally draws.
+    ///
+    /// `DeviceConditions.current` is the process-wide cache the AI's search
+    /// budget already keeps fresh off the OS notifications, so reading it per
+    /// frame is a lock and two loads rather than a trip to the kernel — and the
+    /// effect layer does not have to stand up a second thermal observer to
+    /// learn something the app already knows.
+    @MainActor
+    private var trail: SharinganTrail? {
+        guard !isStill else { return nil }
+        return SharinganTrail.resolve(
+            velocity: geometry.spin.velocity(at: progress),
+            tomoeCount: geometry.tomoeCount,
+            ceiling: SharinganTrail.ceiling(for: DeviceConditions.current.thermalState)
+        )
     }
 
     // MARK: Layers
@@ -435,7 +699,7 @@ struct SharinganFrame: View {
     /// the commas moved a degree.
     ///
     /// So the still half is its own `Equatable` view and rasterises once for the
-    /// whole play, and the moving half is the two draws that actually move. The
+    /// whole play, and the moving half is the draws that actually move. The
     /// catchlight stays with the tomoe because it sits on top of them and
     /// z-order is not negotiable; one soft gradient a frame is the price of
     /// keeping the eye wet.
@@ -447,7 +711,7 @@ struct SharinganFrame: View {
     private func eye(radius: CGFloat) -> some View {
         ZStack {
             IrisPlate(radius: radius, geometry: geometry).equatable()
-            TomoeLayer(angle: spinAngle, geometry: geometry)
+            TomoeLayer(angle: spinAngle, trail: trail, geometry: geometry)
         }
         .frame(width: radius * 2, height: radius * 2)
     }
@@ -588,15 +852,21 @@ private struct IrisPlate: View, Equatable {
 
 // MARK: - Moving half
 
-/// The comma ring and the catchlight over it — the only two draws in the eye
-/// that change from one frame to the next.
+/// The comma ring, its motion trail and the catchlight over them — the only
+/// draws in the eye that change from one frame to the next.
 ///
 /// Not `Equatable`: `angle` moves on every frame, which is the whole point of
-/// the layer. Keeping it to two draws is what makes that affordable.
+/// the layer. Keeping it to a bounded handful of fills is what makes that
+/// affordable — one ring, at most `SharinganTrail.maxSamples` ghosts behind it,
+/// and one gradient, with the ghost count falling to zero on a hot or
+/// conserving device.
 private struct TomoeLayer: View {
 
     /// How far round the orbit the commas have turned.
     let angle: Double
+
+    /// The smear behind them, or `nil` when the ring is too slow to have one.
+    let trail: SharinganTrail?
 
     let geometry: SharinganGeometry
 
@@ -604,6 +874,8 @@ private struct TomoeLayer: View {
         Canvas(opaque: false, colorMode: .extendedLinear, rendersAsynchronously: false) { context, size in
             let centre = CGPoint(x: size.width / 2, y: size.height / 2)
             let iris = min(size.width, size.height) / 2
+
+            drawTrail(in: &context, centre: centre, radius: iris)
 
             context.fill(
                 TomoePath.ring(
@@ -616,6 +888,25 @@ private struct TomoeLayer: View {
             )
 
             drawHighlight(in: &context, centre: centre, radius: iris)
+        }
+    }
+
+    /// The ghosts, furthest back first so the nearest ones land on top and the
+    /// smear reads as fading away from the comma rather than towards it.
+    private func drawTrail(in context: inout GraphicsContext, centre: CGPoint, radius: CGFloat) {
+        guard let trail else { return }
+
+        for index in stride(from: trail.samples, through: 1, by: -1) {
+            let ghost = trail.ghost(index, ringAngle: angle)
+            context.fill(
+                TomoePath.ring(
+                    centre: centre,
+                    irisRadius: radius,
+                    angle: ghost.angle,
+                    geometry: geometry
+                ),
+                with: .color(EffectPalette.sharinganInk.opacity(ghost.opacity))
+            )
         }
     }
 
@@ -656,8 +947,8 @@ private enum Curve {
 
 // MARK: - Self-running effect
 
-/// The eye with a clock: opens, spins up, settles, closes, and reports back.
-/// Drop it in an overlay and forget about it until `onFinished` arrives.
+/// The eye with a clock: opens, winds up, whips away, and reports back. Drop it
+/// in an overlay and forget about it until `onFinished` arrives.
 ///
 /// It is what the board plays through `JutsuEffectView(effect: .sharingan)`;
 /// this type exists on its own so the eye can also be shown outside the jutsu
@@ -670,8 +961,11 @@ private enum Curve {
 /// follows the display and would turn the eye a hundred and twenty times a
 /// second to show a spin that is perfectly legible at sixty. Sixty is the
 /// ceiling here rather than the thirty the arcs get: a rotation is continuous
-/// where a discharge is discrete, and at thirty the commas step fourteen
-/// degrees at a time and start to read as sampled.
+/// where a discharge is discrete. It is also why the trail exists — at the top
+/// of the acceleration the ring turns about thirty-six degrees between frames,
+/// and a comma that jumps that far reads as sampled unless something bridges
+/// the gap. The ghosts are that bridge, and they are cheapest exactly when the
+/// eye is slow enough not to need them.
 struct SharinganEffectView: View {
     var geometry = SharinganGeometry()
     var duration: Double = SharinganTiming.duration
@@ -749,6 +1043,93 @@ struct SharinganEffectView: View {
     }
 }
 
+// MARK: - Orientation proof
+
+/// A tomoe ring with its orbit drawn and an arrow on every comma pointing the
+/// way that comma is travelling — the comet convention, made checkable.
+///
+/// It exists for the previews rather than for the game. The head-leads rule is
+/// invisible on a still frame, which is exactly why it was worth getting wrong;
+/// this draws the derivative that defines it next to the shape that obeys it,
+/// so a later edit that reverses either can be seen to be wrong in a second
+/// without launching a game or trusting a comment.
+private struct TomoeHeadingProof: View {
+
+    var geometry = SharinganGeometry()
+
+    /// Where the ring has turned to, in radians.
+    var angle: Double = 0
+
+    var body: some View {
+        Canvas(opaque: false, colorMode: .extendedLinear, rendersAsynchronously: false) { context, size in
+            let centre = CGPoint(x: size.width / 2, y: size.height / 2)
+            let iris = min(size.width, size.height) / 2 * 0.86
+            let orbit = iris * geometry.orbit
+
+            drawOrbit(in: &context, centre: centre, orbit: orbit)
+
+            context.fill(
+                TomoePath.ring(centre: centre, irisRadius: iris, angle: angle, geometry: geometry),
+                with: .color(EffectPalette.sharinganInk)
+            )
+
+            drawHeadings(in: &context, centre: centre, iris: iris, orbit: orbit)
+        }
+    }
+
+    private func drawOrbit(in context: inout GraphicsContext, centre: CGPoint, orbit: CGFloat) {
+        context.stroke(
+            Path(ellipseIn: CGRect(
+                x: centre.x - orbit, y: centre.y - orbit,
+                width: orbit * 2, height: orbit * 2
+            )),
+            with: .color(Palette.textSecondary.opacity(0.35)),
+            style: StrokeStyle(lineWidth: 1, dash: [3, 4])
+        )
+    }
+
+    /// One arrow per comma, laid on the heading and starting at the head, so
+    /// the arrow leaves the nose and the tail goes the other way.
+    private func drawHeadings(
+        in context: inout GraphicsContext,
+        centre: CGPoint,
+        iris: CGFloat,
+        orbit: CGFloat
+    ) {
+        let count = min(max(1, geometry.tomoeCount), SharinganGeometry.maxTomoeCount)
+        let length = iris * 0.3
+        let barb = iris * 0.075
+
+        var arrows = Path()
+        for index in 0..<count {
+            let phi = angle + Double(index) * 2 * .pi / Double(count)
+            let heading = TomoePath.heading(at: phi)
+            let forward = CGPoint(x: CGFloat(cos(heading)), y: CGFloat(sin(heading)))
+            let side = CGPoint(x: -forward.y, y: forward.x)
+
+            let root = CGPoint(
+                x: centre.x + orbit * CGFloat(cos(phi)) + forward.x * iris * 0.16,
+                y: centre.y + orbit * CGFloat(sin(phi)) + forward.y * iris * 0.16
+            )
+            let tip = CGPoint(x: root.x + forward.x * length, y: root.y + forward.y * length)
+
+            arrows.move(to: root)
+            arrows.addLine(to: tip)
+            arrows.move(to: CGPoint(x: tip.x - forward.x * barb + side.x * barb,
+                                    y: tip.y - forward.y * barb + side.y * barb))
+            arrows.addLine(to: tip)
+            arrows.addLine(to: CGPoint(x: tip.x - forward.x * barb - side.x * barb,
+                                       y: tip.y - forward.y * barb - side.y * barb))
+        }
+
+        context.stroke(
+            arrows,
+            with: .color(Palette.accent),
+            style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)
+        )
+    }
+}
+
 // MARK: - Previews
 
 #Preview("Sharingan, looping") {
@@ -773,24 +1154,119 @@ struct SharinganEffectView: View {
     .ignoresSafeArea()
 }
 
-#Preview("Sharingan, frame by frame") {
-    let steps: [Double] = [0.0, 0.08, 0.2, 0.35, 0.5, 0.65, 0.85, 0.97]
+#Preview("Orientation: heads lead") {
+    let spin = SharinganSpin()
+    let stops: [Double] = [0, 0.25, 0.5, 0.75]
 
     ScrollView {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: Metrics.spacingS)],
-                  spacing: Metrics.spacingS) {
-            ForEach(steps, id: \.self) { step in
-                VStack(spacing: Metrics.spacingXS) {
-                    SharinganFrame(progress: step, dimsBackground: false)
-                        .frame(width: 110, height: 110)
-                        .background(Palette.surface.opacity(0.5))
+        VStack(alignment: .leading, spacing: Metrics.spacingM) {
+            Text("Arrow = direction of travel, from the orbit's derivative")
+                .sectionLabel()
 
-                    Text(String(format: "%.2f", step)).sectionLabel()
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: Metrics.spacingM)],
+                      spacing: Metrics.spacingM) {
+                ForEach(stops, id: \.self) { stop in
+                    VStack(spacing: Metrics.spacingXS) {
+                        TomoeHeadingProof(angle: spin.angle(at: stop))
+                            .frame(width: 150, height: 150)
+                            .notchedPanel(notch: 8, fill: Palette.panel.opacity(0.6))
+
+                        Text(String(format: "t %.2f", stop)).sectionLabel()
+                    }
                 }
             }
+
+            Text("Every round head sits ahead of its own tail along the arrow. "
+                 + "A comma pointing the other way is the bug this preview exists to catch.")
+                .font(Typeface.body(13))
+                .foregroundStyle(Palette.textSecondary)
         }
         .padding(Metrics.spacingL)
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(AmbientBackground())
+}
+
+#Preview("Acceleration and smear") {
+    let steps: [Double] = [0.0, 0.14, 0.28, 0.42, 0.56, 0.70, 0.84, 0.96]
+    let spin = SharinganSpin()
+
+    ScrollView {
+        VStack(alignment: .leading, spacing: Metrics.spacingM) {
+            Text("The trail appears only once omega passes the onset")
+                .sectionLabel()
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: Metrics.spacingS)],
+                      spacing: Metrics.spacingS) {
+                ForEach(steps, id: \.self) { step in
+                    VStack(spacing: Metrics.spacingXS) {
+                        SharinganFrame(progress: step, dimsBackground: false)
+                            .frame(width: 110, height: 110)
+                            .background(Palette.surface.opacity(0.5))
+
+                        Text(String(format: "%.2f", step)).sectionLabel()
+                        Text(String(format: "w %.0f", spin.velocity(at: step)))
+                            .font(Typeface.body(11))
+                            .foregroundStyle(Palette.textSecondary)
+                    }
+                }
+            }
+
+            Text(String(
+                format: "omega0 %.1f, alpha %.1f, peak %.1f rad per unit time — %.1f turns",
+                spin.initialVelocity,
+                spin.acceleration,
+                spin.velocity(at: 1),
+                spin.angle(at: 1) / (2 * .pi)
+            ))
+            .font(Typeface.body(13))
+            .foregroundStyle(Palette.textSecondary)
+        }
+        .padding(Metrics.spacingL)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(AmbientBackground())
+}
+
+#Preview("Spin profile") {
+    let spin = SharinganSpin()
+    let samples = stride(from: 0.0, through: 1.0, by: 0.02).map { $0 }
+
+    VStack(alignment: .leading, spacing: Metrics.spacingM) {
+        Text("Angular velocity and angle against time").sectionLabel()
+
+        Canvas { context, size in
+            let peak = max(0.001, spin.velocity(at: 1))
+            let total = max(0.001, spin.angle(at: 1))
+
+            var velocity = Path()
+            var angle = Path()
+            for (index, t) in samples.enumerated() {
+                let x = size.width * CGFloat(t)
+                let v = CGPoint(x: x, y: size.height * (1 - CGFloat(spin.velocity(at: t) / peak)))
+                let a = CGPoint(x: x, y: size.height * (1 - CGFloat(spin.angle(at: t) / total)))
+                if index == 0 {
+                    velocity.move(to: v)
+                    angle.move(to: a)
+                } else {
+                    velocity.addLine(to: v)
+                    angle.addLine(to: a)
+                }
+            }
+            context.stroke(angle, with: .color(Palette.textSecondary), lineWidth: 1.5)
+            context.stroke(velocity, with: .color(Palette.accent), lineWidth: 2.5)
+        }
+        .frame(height: 170)
+        .notchedPanel(notch: 8, fill: Palette.panel.opacity(0.6))
+
+        Text("Accent: omega, a straight line climbing to the last frame — the "
+             + "motion never stops building. Grey: the angle, its integral, a "
+             + "parabola. Neither ever flattens, which is the difference from "
+             + "an ease-out.")
+            .font(Typeface.body(13))
+            .foregroundStyle(Palette.textSecondary)
+    }
+    .padding(Metrics.spacingL)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(AmbientBackground())
 }
@@ -824,7 +1300,7 @@ struct SharinganEffectView: View {
                   spacing: Metrics.spacingM) {
             ForEach(variants, id: \.0) { variant in
                 VStack(spacing: Metrics.spacingXS) {
-                    SharinganFrame(progress: 0.4, geometry: variant.1, dimsBackground: false)
+                    SharinganFrame(progress: 0.7, geometry: variant.1, dimsBackground: false)
                         .frame(width: 140, height: 140)
 
                     Text(variant.0).sectionLabel()
@@ -833,37 +1309,6 @@ struct SharinganEffectView: View {
         }
         .padding(Metrics.spacingL)
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .background(AmbientBackground())
-}
-
-#Preview("Spin profile") {
-    let spin = SharinganSpin()
-    let samples = stride(from: 0.0, through: 1.0, by: 0.05).map { $0 }
-
-    VStack(alignment: .leading, spacing: Metrics.spacingM) {
-        Text("Turns completed against time").sectionLabel()
-
-        Canvas { context, size in
-            let total = max(0.001, spin.angle(at: 1))
-            var path = Path()
-            for (index, t) in samples.enumerated() {
-                let point = CGPoint(
-                    x: size.width * CGFloat(t),
-                    y: size.height * (1 - CGFloat(spin.angle(at: t) / total))
-                )
-                if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
-            }
-            context.stroke(path, with: .color(Palette.accent), lineWidth: 2)
-        }
-        .frame(height: 160)
-        .notchedPanel(notch: 8, fill: Palette.panel.opacity(0.6))
-
-        Text("Steep at the start, flat at the end — fast then settling")
-            .font(Typeface.body(13))
-            .foregroundStyle(Palette.textSecondary)
-    }
-    .padding(Metrics.spacingL)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(AmbientBackground())
 }

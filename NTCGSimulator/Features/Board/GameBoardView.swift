@@ -25,6 +25,39 @@
 //  backstop that clears it — so a player who taps straight through the pictures
 //  plays exactly the same game as one who watches all of them.
 //
+//  The holograms standing over the mat follow the same discipline, and one more
+//  besides. They are worked out from the position — the bodies in play and the
+//  Supports both players have seen, which is an information rule and so is
+//  decided here rather than in the card views — and drawn in a single overlay
+//  above the whole board, from the frames the cards publish, exactly as the
+//  attack shot is. Each projection is confined to its own side's rows band,
+//  measured from rects the layout publishes rather than guessed, so no plane
+//  ever covers the status strip, a side's name and life, or the counters. They
+//  take no touches, and they get out of the way of the game rather than
+//  competing with it: nothing projects while a jutsu is filling the screen or
+//  while the mat is lit for a target, because in both of those moments the
+//  board is the thing being read.
+//
+//  The cards in play are drawn as real objects on the field stage by the same
+//  technique, one layer lower. `BoardCard3DLayer` takes the frames the mat
+//  publishes, runs the stage camera backwards to find the world point that
+//  projects onto each one, and lays a card slab there — so the slab is under
+//  the tap that selects it by construction, not by tuning. It sits BELOW the
+//  board's own chrome, and a card handed to it draws no printing of its own,
+//  which is what keeps every badge, damage number, target ring, the shot and
+//  the card viewer working over it exactly as they did over a flat face.
+//  Hands stay 2D: a hand card is being read and chosen between, not looked
+//  at. The whole layer collapses to nothing on any of the usual signals, and
+//  the board is then precisely what it was before it existed.
+//
+//  This screen also owns the soundtrack's whole lifetime. `MusicPlayer` starts
+//  nothing by itself and `SettingsStore` no longer nudges it, so the music is
+//  exactly as long-lived as this view: it begins on appear, ends on disappear —
+//  leaving for the menu, or the result overlay taking the player back there —
+//  and ends again the moment the app leaves the foreground. That is what keeps
+//  a soundtrack a soundtrack rather than something following the player around
+//  the deck builder.
+//
 
 import SwiftUI
 
@@ -162,6 +195,12 @@ struct BoardLayout: Equatable {
 
     var leaderWidth: CGFloat { slotWidth * Self.leaderRatio }
 
+    /// The Leader card's own height, from the printed ratio. Named because
+    /// the Leader's slot has to be pinned to it — see `BoardSideView`'s
+    /// `leaderFace`, where an unpinned slot published a frame that grew
+    /// whenever a corner badge appeared.
+    var leaderHeight: CGFloat { leaderWidth / Metrics.cardAspect }
+
     /// Five Chakra cards and the Summon zone share one row's width.
     var chakraWidth: CGFloat {
         max(16, ((Self.columns - 1) * slotWidth - gap) / Self.chakraDivisor)
@@ -207,10 +246,60 @@ struct BoardCardFace: View {
     /// player's own set Support may be shown blurred, an opponent's may not.
     var faceDown: FaceDownStyle? = nil
 
+    /// True when the 3D card layer behind the board is drawing this card as a
+    /// slab on the field stage. The printing then belongs to the slab, and
+    /// this face draws nothing that would cover it.
+    var rendersAsSlab: Bool = false
+
     var body: some View {
+        if rendersAsSlab {
+            slabStandIn
+        } else {
+            printedFace
+        }
+    }
+
+    // MARK: Slab stand-in
+
+    /// What a slot holds while its card is being drawn in 3D behind the mat.
+    ///
+    /// It is transparent, because the slab is UNDER the board's own chrome:
+    /// anything this view filled would hide the card it stands for. What it
+    /// does keep is the two things on a card face that are game state rather
+    /// than picture — the ring that says "this is choosable" and the veil
+    /// that steps a card back while something else is being chosen. The 2D
+    /// face expresses that second one by fading itself to 45%, which a view
+    /// in front of the card cannot do, so it is a veil over the slot instead.
+    ///
+    /// The silhouette is the SLAB's, not the mat's: rounded to the same
+    /// die-cut radius `Card3DMetrics` builds the mesh's corners at, so a ring
+    /// drawn here traces the card the player can actually see rather than the
+    /// notched panel the 2D face wears.
+    private var slabStandIn: some View {
+        let shape = RoundedRectangle(
+            cornerRadius: width * Card3DMetrics.cornerRadiusRatio,
+            style: .continuous
+        )
+
+        return shape
+            .fill(isDimmed
+                  ? Palette.backdrop.opacity(BoardCard3DMetrics.steppedBackVeil)
+                  : Color.clear)
+            .overlay {
+                if let highlight {
+                    shape.strokeBorder(highlight, lineWidth: 2.5)
+                }
+            }
+            .frame(width: width, height: width / Metrics.cardAspect)
+            .accessibilityHidden(true)
+    }
+
+    // MARK: Printed face
+
+    private var printedFace: some View {
         let design = designWidth
 
-        CardFaceView(
+        return CardFaceView(
             card: card,
             size: size,
             isDimmed: isDimmed,
@@ -249,6 +338,10 @@ struct GameBoardView: View {
     @Environment(DeckStore.self) private var decks
     @Environment(SettingsStore.self) private var settings
 
+    /// Watched only for the music: an app that has gone to the background is no
+    /// longer a match being played, whatever the navigation stack still holds.
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var engine: GameEngine?
 
     /// Counts the games played on this screen. It is the stage's identity, so
@@ -273,8 +366,40 @@ struct GameBoardView: View {
             }
         }
         .task { if engine == nil { startNewGame() } }
+        .onAppear { startMusic() }
+        .onDisappear { MusicPlayer.shared.stopMatch() }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background:
+                // Not `.inactive`: that is also the app switcher being peeked
+                // at and the Control Centre being pulled down, neither of which
+                // is a player who has left the game.
+                MusicPlayer.shared.stopMatch()
+            case .active:
+                startMusic()
+            default:
+                break
+            }
+        }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
+    }
+
+    // MARK: Soundtrack
+
+    /// Hands the saved choice to the player, which is the only way music ever
+    /// starts in this app.
+    ///
+    /// It lives on this view rather than on the stage below because the stage
+    /// is rebuilt for every rematch: "Play again" is still the same sitting at
+    /// the board, and restarting the track from the top would announce a new
+    /// game the player did not travel anywhere to reach. `startMatch` is safe
+    /// to call twice, so returning to the foreground goes through the same door.
+    private func startMusic() {
+        MusicPlayer.shared.startMatch(
+            selection: settings.musicSelection,
+            volume: settings.musicVolume
+        )
     }
 
     private func startNewGame() {
@@ -310,6 +435,14 @@ private struct BoardStage: View {
     @Environment(SettingsStore.self) private var settings
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// The player's switch for the 3D cards, on by default.
+    ///
+    /// Read straight out of `UserDefaults` for the same reason the hologram
+    /// switch is: a kill switch for a decoration owns its own key, so it
+    /// works — and can be flipped — without touching `SettingsStore`'s
+    /// persisted format. `Card3DDefaults` is the one name for it.
+    @AppStorage(Card3DDefaults.enabledKey) private var cards3DEnabled = true
 
     /// The card in the reader.
     @State private var focusedCard: Card?
@@ -362,6 +495,16 @@ private struct BoardStage: View {
     /// is about to take off the board — see `AttackShot`.
     @State private var cardCentres = CardCentres()
 
+    /// Holograms whose card has left the field, kept on the mat for the length
+    /// of the collapse so the light folds back into the card rather than
+    /// blinking out of existence.
+    @State private var hologramExits: [HologramExit] = []
+
+    /// Where every card on the mat was last drawn, in the hologram overlay's
+    /// space. Kept for the one question nothing on screen can answer any more:
+    /// where the card a hologram is collapsing into used to be.
+    @State private var hologramFrames = HologramFrames()
+
     /// The most recent refusal, shown briefly rather than as an alert.
     @State private var banner: BoardBanner?
 
@@ -388,16 +531,53 @@ private struct BoardStage: View {
 
             let canvas = layout.canvasSize(in: geo.size)
 
+            // Worked out once per pass and used twice: the 2D faces are told
+            // which cards to stand aside for, and the layer below places the
+            // slabs that replace them. One list means the two can never
+            // disagree and leave a slot empty.
+            let cast = card3DCast
+            let slabs = Set(cast.map(\.anchor))
+
             Group {
                 if layout.isCompact {
-                    compactBoard(layout)
+                    compactBoard(layout, slabs: slabs)
                 } else {
-                    regularBoard(layout)
+                    regularBoard(layout, slabs: slabs)
                 }
             }
             .frame(width: canvas.width, height: canvas.height)
             .scaleEffect(layout.contentScale)
             .frame(width: geo.size.width, height: geo.size.height)
+            // The cards themselves, as slabs on the stage's ground plane —
+            // behind the board's own chrome so every badge, number and target
+            // mark still draws over them, and outside the zoom for the reason
+            // the hologram and shot layers are: the frames the cards published
+            // resolve in screen points, and a slab is placed from those.
+            .backgroundPreferenceValue(BoardCardAnchorKey.self) { anchors in
+                GeometryReader { proxy in
+                    card3DLayer(cast, anchors: anchors, in: proxy)
+                }
+                // The same rect the stage covers, so the slabs and the mat
+                // they lie on are projected through one camera in one space
+                // rather than through the same camera in two.
+                .ignoresSafeArea()
+            }
+            // The stage sits behind the whole board rather than inside the
+            // scaled canvas: scenery should not shrink with the mat on a small
+            // phone. It holds still while a jutsu plays so the frame budget
+            // goes to the foreground.
+            .background {
+                FieldStage(isEffectPlaying: jutsuPlaying != nil)
+            }
+            // Above the mat and below the shot, and outside the zoom for the
+            // same reason the shot is: the frames the cards published resolve
+            // in screen points, so a projection stands over the card that cast
+            // it even on a board that had to scale itself down.
+            .overlayPreferenceValue(BoardCardAnchorKey.self) { anchors in
+                GeometryReader { proxy in
+                    hologramLayer(anchors, in: proxy)
+                }
+            }
             // Outside the zoom, so the endpoints the cards published resolve
             // in screen points and a shot drawn here lands on the card it was
             // aimed at even on a board that had to scale itself down.
@@ -455,6 +635,13 @@ private struct BoardStage: View {
         .task(id: banner?.id) { await fadeBanner() }
         .task(id: attackShot?.id) { await sweepAttackShot() }
         .task(id: jutsuPlaying?.id) { await sweepJutsu() }
+        .task(id: hologramExits.map(\.id)) { await sweepHologramExits() }
+        // Watched rather than derived inside the overlay, because a hologram
+        // that is collapsing belongs to a card the position no longer has: the
+        // only place the departure is visible is the change itself.
+        .onChange(of: hologramSubjects) { previous, current in
+            trackHolograms(from: previous, to: current)
+        }
         // The engine is Foundation-only and holds its own copy of the one
         // setting the rules care about, so the board keeps the two in step.
         .task(id: settings.autoPass) { engine.autoPass = settings.autoPass }
@@ -464,13 +651,13 @@ private struct BoardStage: View {
 
     /// Phone portrait: everything stacks, the journal hides behind a button and
     /// the reader becomes a bar along the bottom.
-    private func compactBoard(_ layout: BoardLayout) -> some View {
+    private func compactBoard(_ layout: BoardLayout, slabs: Set<BoardCardAnchor>) -> some View {
         VStack(spacing: Metrics.spacingS) {
-            side(farSlot, layout: layout)
+            side(farSlot, layout: layout, slabs: slabs)
             Spacer(minLength: 0)
             statusBar(layout)
             Spacer(minLength: 0)
-            side(nearSlot, layout: layout)
+            side(nearSlot, layout: layout, slabs: slabs)
             hand(layout)
             inspector(layout)
         }
@@ -480,14 +667,14 @@ private struct BoardStage: View {
 
     /// iPad and landscape: the reader keeps a permanent rail and the journal
     /// sits beside the status bar in the middle band.
-    private func regularBoard(_ layout: BoardLayout) -> some View {
+    private func regularBoard(_ layout: BoardLayout, slabs: Set<BoardCardAnchor>) -> some View {
         HStack(alignment: .top, spacing: Metrics.spacingM) {
             VStack(spacing: Metrics.spacingS) {
-                side(farSlot, layout: layout)
+                side(farSlot, layout: layout, slabs: slabs)
                 Spacer(minLength: 0)
                 middleBand(layout)
                 Spacer(minLength: 0)
-                side(nearSlot, layout: layout)
+                side(nearSlot, layout: layout, slabs: slabs)
                 hand(layout)
             }
             .frame(maxWidth: .infinity)
@@ -509,7 +696,11 @@ private struct BoardStage: View {
 
     // MARK: Bands
 
-    private func side(_ slot: PlayerSlot, layout: BoardLayout) -> some View {
+    private func side(
+        _ slot: PlayerSlot,
+        layout: BoardLayout,
+        slabs: Set<BoardCardAnchor>
+    ) -> some View {
         BoardSideView(
             slot: slot,
             title: displayName(for: slot),
@@ -526,7 +717,8 @@ private struct BoardStage: View {
             flashes: damageFlashes,
             onFlashFinished: { id in damageFlashes.removeAll { $0.id == id } },
             reveals: supportReveals.filter { $0.slot == slot },
-            onRevealFinished: { id in supportReveals.removeAll { $0.id == id } }
+            onRevealFinished: { id in supportReveals.removeAll { $0.id == id } },
+            slabs: slabs
         )
         .frame(height: layout.sideHeight)
     }
@@ -556,6 +748,10 @@ private struct BoardStage: View {
             onCancelTargeting: cancelTargetingAction,
             targetingNote: targetingNote
         )
+        // The one piece of chrome that sits directly against a card row. The
+        // hologram overlay holds the near side's projections below this frame,
+        // so the band's text stays readable whatever stands on the mat.
+        .boardCardAnchor(.statusBand)
     }
 
     /// The short instruction the band carries while the mat is lit for a
@@ -1813,6 +2009,289 @@ private struct BoardStage: View {
         attackShot = nil
     }
 
+    // MARK: 3D cards
+
+    /// The cards in play the board is drawing as slabs on the field stage.
+    ///
+    /// Empty is the whole fallback: every 2D face draws its printing exactly
+    /// as it did before this layer existed, so a device that has asked for
+    /// less — the player's switch, Reduce Motion, Low Power Mode, a warm
+    /// chassis — gets the flat board with nothing missing and nothing
+    /// misplaced. The reasoning for each of those is in `BoardCard3DBudget`,
+    /// and it is asked here, once, so the faces and the scene are told the
+    /// same thing in the same pass.
+    ///
+    /// What it is deliberately NOT emptied by is the card viewer or a jutsu:
+    /// the board stays visible behind both, and a card that swapped renderer
+    /// under a dim scrim would read as the mat glitching. Those hold the
+    /// slabs STILL instead — `isPaused` below — which is where the cost
+    /// actually is.
+    private var card3DCast: [BoardCard3DSubject] {
+        guard BoardCard3DBudget.rendersSlabs(
+            isEnabled: cards3DEnabled,
+            reduceMotion: reduceMotion
+        ) else { return [] }
+
+        return BoardCard3DCast.subjects(
+            engine: engine,
+            // The same lookup the Chakra row draws its marker from, so the
+            // slab and the card under it are one decision.
+            summonCard: BoardPoolLookup.summon(in: engine.database),
+            reveals: supportReveals
+        )
+    }
+
+    /// The slab layer, mounted between the field stage and the board.
+    ///
+    /// Nothing is mounted at all when the cast is empty: an idle `SCNView` is
+    /// still a Metal layer and a drawable pool, and the cheapest 3D card is
+    /// the one that is not there.
+    @ViewBuilder
+    private func card3DLayer(
+        _ cast: [BoardCard3DSubject],
+        anchors: [BoardCardAnchor: Anchor<CGRect>],
+        in proxy: GeometryProxy
+    ) -> some View {
+        if !cast.isEmpty {
+            BoardCard3DLayer(
+                subjects: cast,
+                frames: anchors.mapValues { proxy[$0] },
+                stageSize: proxy.size,
+                // Still while a jutsu fills the screen, while the viewer has
+                // a card up, and once the game is over: in all three the mat
+                // is not the thing being looked at, and a still scene renders
+                // one frame per change instead of thirty a second.
+                isPaused: jutsuPlaying != nil || zoomedCard != nil || engine.isFinished
+            )
+        }
+    }
+
+    // MARK: Holograms
+
+    /// The projections standing over the mat, in one overlay above the whole
+    /// board.
+    ///
+    /// One layer rather than an overlay inside each card view, for three
+    /// reasons that all point the same way: a projection stands more than a
+    /// card's height above its slot and would clip at the slot's bounds; it
+    /// would shrink with the board's own zoom, which the stage behind it does
+    /// not; and holograms have to layer against each other and against that
+    /// stage, which cards in separate subtrees cannot do.
+    ///
+    /// Decoration, and the least load-bearing thing on the screen. It takes no
+    /// touches at all, and `HologramLayer` answers to the player's master
+    /// switch, to Low Power Mode, to the thermal state and to its own
+    /// simultaneous ceiling before it draws anything — so on a phone that is
+    /// working hard this costs exactly nothing.
+    private func hologramLayer(
+        _ anchors: [BoardCardAnchor: Anchor<CGRect>],
+        in proxy: GeometryProxy
+    ) -> some View {
+        let frames = anchors.mapValues { proxy[$0] }
+
+        return HologramLayer(candidates: hologramCandidates(in: frames))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .allowsHitTesting(false)
+            .onChange(of: frames, initial: true) { _, latest in
+                // Merged rather than replaced, so a card that has just left the
+                // field still has a frame for its hologram to collapse into.
+                // It cannot grow without bound: the keys are the cards of one
+                // game, and the whole board is rebuilt for the next.
+                hologramFrames.rects.merge(latest) { _, newest in newest }
+            }
+    }
+
+    /// Every hologram the board wants on screen, live ones and the ones still
+    /// folding away.
+    ///
+    /// Hiding is `isPresented`, not absence. A candidate dropped from the list
+    /// ceases to exist between two frames; one flipped to false folds down over
+    /// the collapse and then costs nothing at all, and the same flag back to
+    /// true stands it up again. So a jutsu filling the screen, or a target
+    /// being chosen, puts the holograms away rather than blinking them out.
+    private func hologramCandidates(in frames: [BoardCardAnchor: CGRect]) -> [HologramCandidate] {
+        let isShowing = hologramsAreShowing
+
+        var candidates = hologramSubjects.compactMap { subject -> HologramCandidate? in
+            guard let rect = frames[subject.anchor],
+                  let region = hologramRegion(for: subject.slot, in: frames),
+                  // A card whose centre has left its side's band casts nothing:
+                  // the only way that happens is the Characters row scrolling a
+                  // body past its own edge, and a projection leaning back in
+                  // from off-row would point at nothing the player can see.
+                  region.contains(CGPoint(x: rect.midX, y: rect.midY))
+            else { return nil }
+            return HologramCandidate(
+                id: subject.id,
+                card: subject.card,
+                anchorRect: rect,
+                isPresented: isShowing,
+                region: region
+            )
+        }
+
+        candidates += hologramExits.map { exit in
+            HologramCandidate(
+                id: exit.id,
+                card: exit.card,
+                anchorRect: exit.rect,
+                isPresented: false,
+                region: exit.region
+            )
+        }
+        return candidates
+    }
+
+    /// The band `slot`'s holograms may occupy right now, worked out from the
+    /// frames the layout itself published — see `BoardHologramRegion` for the
+    /// derivation and the reasoning.
+    private func hologramRegion(
+        for slot: PlayerSlot,
+        in frames: [BoardCardAnchor: CGRect]
+    ) -> CGRect? {
+        BoardHologramRegion.region(
+            rows: frames[.playRegion(slot)],
+            statusBand: frames[.statusBand],
+            isNear: slot == nearSlot
+        )
+    }
+
+    /// Whether the mat may carry holograms at all this instant.
+    ///
+    /// They are decoration, so they lose every argument they are in. A jutsu
+    /// filling the screen is the picture the player is meant to be watching. A
+    /// prompt or an armed attacker means the mat itself is the question being
+    /// asked, and a lit plane standing over the row being chosen from is
+    /// exactly the wrong thing to add to it — during targeting the board has to
+    /// stay legible. The card viewer and the result overlay cover the board
+    /// outright, and a hologram ticking behind either of them is heat with
+    /// nothing to show for it.
+    private var hologramsAreShowing: Bool {
+        jutsuPlaying == nil
+            && zoomedCard == nil
+            && armedAttacker == nil
+            && engine.pendingChoice == nil
+            && !engine.isFinished
+    }
+
+    /// Every card on the field that casts a hologram, in a stable order: the
+    /// bodies in play, and the Supports both players have seen.
+    ///
+    /// This list is an information rule written out, which is why it is worked
+    /// out here and not in the card views. Characters are face-up by
+    /// definition, but a Support is on this list only once it is public. The
+    /// near player's own set card is not public: the mat blurs it for them as
+    /// a convenience, and a hologram over it would be a second, brighter copy
+    /// of a card the opponent is entitled to not see. Hands, decks and trashes
+    /// are not the field, so nothing in them is here.
+    ///
+    /// Two face-up cards are deliberately absent, and both absences were
+    /// measured on a device rather than guessed. The Leaders live in the
+    /// label column — the side's name above the card, the life readout below —
+    /// so every placement of a projection there covers state: full size it
+    /// reached the status strip and the life pill, and shrunk into the column
+    /// it sat on the name. The Summon marker sits in the edge row of its
+    /// half, so its plane stood a full plane-height away on the Support row,
+    /// visibly detached from the marker casting it; a plane small enough to
+    /// stay off that row is a speck. For both, the cheapest hologram is the
+    /// one that is not there — the same answer thermal pressure gives.
+    ///
+    /// Identity is the in-play instance rather than the printing, so two copies
+    /// of one card never rise, bob or flicker in step — and so a hologram
+    /// survives every change to the position except the one that matters, its
+    /// own card leaving.
+    private var hologramSubjects: [HologramSubject] {
+        var subjects: [HologramSubject] = []
+
+        for slot in PlayerSlot.allCases {
+            for character in engine.side(slot).characters {
+                guard let card = engine.card(for: character) else { continue }
+                subjects.append(HologramSubject(
+                    id: character.id.uuidString,
+                    slot: slot,
+                    anchor: .character(character.id),
+                    card: card
+                ))
+            }
+
+            subjects.append(contentsOf: faceUpSupports(on: slot))
+        }
+        return subjects
+    }
+
+    /// The Supports on one side that both players have seen.
+    ///
+    /// It mirrors the slot's own reckoning exactly: a card the engine still
+    /// holds is public once it is revealed, and a card the engine has already
+    /// disposed of goes on projecting for as long as the mat is holding it in
+    /// the emptied slot. Both of those states put the card on the chain first,
+    /// so nothing drawn here was ever hidden from anybody.
+    private func faceUpSupports(on slot: PlayerSlot) -> [HologramSubject] {
+        let supports = engine.side(slot).supports
+
+        return supports.indices.compactMap { index -> HologramSubject? in
+            let placed = supports[index]
+
+            if let reveal = supportReveals.first(where: { $0.slot == slot && $0.slotIndex == index }),
+               placed == nil || placed?.id == reveal.supportID,
+               let card = database.card(id: reveal.cardID) {
+                return HologramSubject(
+                    id: reveal.supportID.uuidString,
+                    slot: slot,
+                    anchor: .support(slot, index),
+                    card: card
+                )
+            }
+
+            guard let placed, placed.isRevealed, let card = engine.card(for: placed) else { return nil }
+            return HologramSubject(
+                id: placed.id.uuidString,
+                slot: slot,
+                anchor: .support(slot, index),
+                card: card
+            )
+        }
+    }
+
+    /// Keeps the collapse list in step with the field.
+    ///
+    /// The frame comes from `hologramFrames` rather than from the overlay,
+    /// because by the time a departure is visible the card is already off the
+    /// mat and has no frame left to publish.
+    private func trackHolograms(from previous: [HologramSubject], to current: [HologramSubject]) {
+        let live = Set(current.map(\.id))
+
+        // A card that came straight back stands its hologram up again rather
+        // than finishing a collapse it has no reason to play.
+        hologramExits.removeAll { live.contains($0.id) }
+
+        for subject in previous where !live.contains(subject.id) {
+            guard !hologramExits.contains(where: { $0.id == subject.id }),
+                  let rect = hologramFrames.rects[subject.anchor],
+                  let region = hologramRegion(for: subject.slot, in: hologramFrames.rects)
+            else { continue }
+            hologramExits.append(
+                HologramExit(id: subject.id, card: subject.card, rect: rect, region: region)
+            )
+        }
+    }
+
+    /// Drops collapses that have finished.
+    ///
+    /// Driven by the list itself, so a board wipe that ends five holograms at
+    /// once is swept in a single pass and anything that started later is swept
+    /// by the run the change kicks off. The loop is the backstop for the case
+    /// where nothing was old enough to remove and the list therefore never
+    /// changed — without it those holograms would sit collapsed forever.
+    private func sweepHologramExits() async {
+        while !hologramExits.isEmpty {
+            try? await Task.sleep(for: .seconds(HologramMetrics.collapseDuration + 0.05))
+            guard !Task.isCancelled else { return }
+            let cutoff = Date.now.addingTimeInterval(-HologramMetrics.collapseDuration)
+            hologramExits.removeAll { $0.startedAt <= cutoff }
+        }
+    }
+
     /// The full-screen card viewer.
     @ViewBuilder
     private var zoomOverlay: some View {
@@ -2122,6 +2601,120 @@ private struct AttackShot: Identifiable, Equatable {
 @MainActor
 private final class CardCentres {
     var points: [ProjectileAnchor: CGPoint] = [:]
+}
+
+// MARK: - Holograms
+
+/// Works out the band one side's holograms may occupy, from the frames the
+/// layout published.
+///
+/// The previous attempt clamped projections to the whole overlay, and that
+/// was the wrong region twice over: the overlay spans the chrome — the status
+/// strip, the side labels, the life pills, the counters — so "on screen"
+/// never stopped a plane from standing on any of them. The right region is
+/// the side's own rows band, stretched only across space nothing else owns:
+/// down to the status strip's edge for the far half, up from it for the near
+/// half. Both rects come from the layout itself, resolved in the same pass
+/// and the same coordinate space as the card frames they constrain, so the
+/// region can never disagree with the cards about where anything is.
+///
+/// A plain enum of pure functions so the derivation is testable without a
+/// running board.
+enum BoardHologramRegion {
+
+    /// Air kept between a projection and the status strip's edge, points.
+    static let bandClearance: CGFloat = Metrics.spacingXS
+
+    /// The region for one side, or nil while the layout has not published its
+    /// rows yet — a candidate without a region simply does not cast this
+    /// frame, which is also what keeps a projection from drawing unclamped
+    /// against a layout that has not settled.
+    static func region(rows: CGRect?, statusBand: CGRect?, isNear: Bool) -> CGRect? {
+        guard let rows, !rows.isEmpty, !rows.isNull,
+              rows.origin.x.isFinite, rows.origin.y.isFinite,
+              rows.width.isFinite, rows.height.isFinite
+        else { return nil }
+
+        // Without a band to measure against, the rows themselves are the
+        // whole of the safe space.
+        guard let statusBand, !statusBand.isEmpty else { return rows }
+
+        if isNear {
+            // The near half sits below the strip: its holograms may rise into
+            // the slack air above the rows, but no further than the strip.
+            let top = min(rows.minY, statusBand.maxY + bandClearance)
+            return CGRect(
+                x: rows.minX, y: top,
+                width: rows.width, height: rows.maxY - top
+            )
+        }
+
+        // The far half sits above the strip: the overlay's top edge is
+        // already inside the safe area, so everything from it down to the
+        // strip is free.
+        let top = min(rows.minY, 0)
+        let bottom = max(rows.maxY, statusBand.minY - bandClearance)
+        return CGRect(
+            x: rows.minX, y: top,
+            width: rows.width, height: bottom - top
+        )
+    }
+}
+
+/// One face-up card on the field, and where its frame can be found.
+private struct HologramSubject: Equatable {
+
+    /// The in-play instance rather than the printing — a character's board
+    /// identity, or a Support's. Two copies of one card therefore get two
+    /// identities, which is what keeps their holograms from bobbing and
+    /// flickering in step, and an identity that survives a change to the
+    /// position is what keeps a hologram from re-entering every time the
+    /// board redraws.
+    let id: String
+
+    /// The side the card stands on, which names the region its hologram is
+    /// confined to.
+    let slot: PlayerSlot
+
+    /// Which published frame this card is drawn in.
+    let anchor: BoardCardAnchor
+
+    let card: Card
+}
+
+/// One hologram whose card has left the field, still folding away.
+private struct HologramExit: Identifiable, Equatable {
+
+    /// The departed subject's identity, so a card that comes straight back
+    /// reclaims its own hologram instead of standing up a second one.
+    let id: String
+
+    let card: Card
+
+    /// The last frame the card published. It is not on the mat any more, so
+    /// there is nowhere else left to ask.
+    let rect: CGRect
+
+    /// The band the hologram was confined to while it stood, kept so the
+    /// collapse folds down inside the same limits it rose inside.
+    let region: CGRect
+
+    /// When the collapse began. Held rather than counted down, so one sweep
+    /// can retire several collapses that started at different moments.
+    let startedAt = Date.now
+}
+
+/// Where every card on the mat was last drawn, in the hologram overlay's space.
+///
+/// A box rather than a value in `@State`, for exactly the reason `CardCentres`
+/// is one: the board writes it on every layout pass, and held as state it would
+/// invalidate the whole mat every time a card moved. Live holograms never read
+/// it — they are built from the frames the overlay already has in hand — so the
+/// only question it answers is where the card that has just left used to be,
+/// which is the one question nothing on screen can answer any more.
+@MainActor
+private final class HologramFrames {
+    var rects: [BoardCardAnchor: CGRect] = [:]
 }
 
 /// What the board has to remember about a position in order to tell what an

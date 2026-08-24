@@ -18,8 +18,9 @@ struct SettingsView: View {
     @Environment(CardDatabase.self) private var database
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// The app's one music player. It is not injected because music outlives
-    /// every screen — see `MusicPlayer.shared`.
+    /// The app's one music player, read here for the level and the folder it
+    /// scans — never to start anything. Only the board starts music; see
+    /// `MusicPlayer.shared`.
     private let music = MusicPlayer.shared
 
     /// Local mirror of the username so the store is only written on commit,
@@ -45,7 +46,18 @@ struct SettingsView: View {
     /// `CardDatabase.lastImportError`.
     @State private var pickerError: String?
 
+    /// The board's hologram switch.
+    ///
+    /// Read straight out of `UserDefaults` rather than from `SettingsStore`,
+    /// because that is where the board reads it: a kill switch for an effect
+    /// has to work without a schema change, so the effect owns its own key and
+    /// this screen simply binds to it. `HologramDefaults` is the one name for
+    /// it, and the default is on.
+    @AppStorage(HologramDefaults.enabledKey) private var hologramsEnabled = true
 
+    /// The board's 3D card switch, bound the same way and for the same
+    /// reason. `Card3DDefaults` owns the key; the default is on.
+    @AppStorage(Card3DDefaults.enabledKey) private var cards3DEnabled = true
 
     var body: some View {
         @Bindable var settings = settings
@@ -59,6 +71,8 @@ struct SettingsView: View {
                 VStack(spacing: Metrics.spacingM) {
                     chakraRow(selection: $settings.chakraCardID)
                     themeRow(selection: $settings.appearance)
+                    cards3DRow(isOn: $cards3DEnabled)
+                    hologramRow(isOn: $hologramsEnabled)
                     autoPassRow(selection: $settings.autoPass)
                     targetConfirmationRow(selection: $settings.targetConfirm)
                     jutsuSummonRow(isOn: $settings.confirmJutsuSummon)
@@ -158,6 +172,45 @@ struct SettingsView: View {
                 options: AppearanceMode.allCases.map { (value: $0, title: $0.title) },
                 selection: selection
             )
+        }
+    }
+
+    /// The board's 3D cards, on by default.
+    ///
+    /// It sits directly above the hologram switch because the two are the
+    /// same kind of thing — the board's two decorations, each with its own
+    /// cost — and the copy says the same three things about both: what it
+    /// does, that it changes no rule, and that a warm device is the reason to
+    /// turn it off. Cards in hand are named explicitly, because "3D cards"
+    /// otherwise sounds like it might soften the cards a player is reading.
+    private func cards3DRow(isOn: Binding<Bool>) -> some View {
+        SettingRow(
+            title: "3D cards on the field",
+            explanation: "Cards in play are drawn as real card objects lying on the field, catching the light as it moves. Cards in your hand stay flat and sharp. It is decoration only and changes no rule, so turn it off if your device runs warm.",
+            placement: .trailing
+        ) {
+            Toggle("3D cards on the field", isOn: isOn)
+                .labelsHidden()
+                .tint(Palette.accent)
+        }
+    }
+
+    /// The board's holograms, on by default.
+    ///
+    /// It says what turning it off costs — nothing — and why anybody would,
+    /// because "it makes my phone warm" is the only real reason to and a player
+    /// should not have to guess that the switch is there for it. The board
+    /// already sheds holograms on its own under Low Power Mode and a hot
+    /// chassis; this is the deliberate version of the same decision.
+    private func hologramRow(isOn: Binding<Bool>) -> some View {
+        SettingRow(
+            title: "Card holograms",
+            explanation: "Face-up cards on the field cast their artwork above them, the way a duel looks in the anime. It is decoration only and changes no rule, so turn it off if your device runs warm.",
+            placement: .trailing
+        ) {
+            Toggle("Card holograms", isOn: isOn)
+                .labelsHidden()
+                .tint(Palette.accent)
         }
     }
 
@@ -274,66 +327,31 @@ struct SettingsView: View {
 
     // MARK: Music
 
-    /// The music section.
+    /// The music section — how loud, and nothing else.
     ///
-    /// The app ships with no tracks of its own, so the empty case is the one
-    /// this row is designed around rather than an afterthought: it says plainly
-    /// that there is nothing, and prints the folder to put files in. The folder
-    /// line stays visible once there are tracks, because that is also where a
-    /// replacement goes.
+    /// The list of tracks used to live here and does not any more. Music plays
+    /// only while a match is on the board, so a song list in Settings was a list
+    /// of buttons that could not do the thing they looked like they did: tapping
+    /// one from the preferences screen started nothing, because there was no
+    /// game to score. The choice now sits beside the AI difficulty on the screen
+    /// a game starts from, where it is a decision about the game about to be
+    /// played. What is left here is the level, which is a preference in the
+    /// ordinary sense — set once, true of every game after it.
     private var musicRow: some View {
         SettingRow(
             title: "Music",
-            explanation: "Background music while you play. It mixes with whatever else your device is doing and follows the ring switch, so it never takes the sound away from anything else."
+            explanation: "The soundtrack plays while you are on the board and stops the moment you leave it. Which track plays is chosen on the screen a game starts from; this is how loud it is."
         ) {
             VStack(alignment: .leading, spacing: Metrics.spacingM) {
-                if music.library.isEmpty {
-                    musicEmptyNote
-                } else {
-                    musicChoices
-                    musicVolumeControl
-                }
-
-                musicStatus
+                musicVolumeControl
+                musicOffNote
                 musicFolderNote
             }
         }
     }
 
-    private var musicChoices: some View {
-        VStack(alignment: .leading, spacing: Metrics.spacingS) {
-            ChoiceRow(
-                title: "Off",
-                subtitle: "No music at all.",
-                isSelected: settings.musicSelection == .off
-            ) { choose(.off) }
-
-            ChoiceRow(
-                title: "Shuffle",
-                subtitle: "A different track every time one ends.",
-                isSelected: settings.musicSelection == .shuffle
-            ) { choose(.shuffle) }
-
-            ForEach(music.library.tracks) { track in
-                ChoiceRow(
-                    title: track.title,
-                    subtitle: "On repeat.",
-                    isSelected: settings.musicSelection == .track(id: track.id)
-                ) { choose(.track(id: track.id)) }
-            }
-        }
-    }
-
-    private func choose(_ selection: MusicSelection) {
-        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) {
-            settings.musicSelection = selection
-        }
-    }
-
     private var musicVolumeControl: some View {
-        let isSilent = settings.musicSelection == .off
-
-        return VStack(alignment: .leading, spacing: Metrics.spacingXS) {
+        VStack(alignment: .leading, spacing: Metrics.spacingXS) {
             Text("Volume").sectionLabel()
 
             HStack(spacing: Metrics.spacingS) {
@@ -355,42 +373,42 @@ struct SettingsView: View {
             }
         }
         .onChange(of: draftVolume) { _, level in
-            // Heard immediately; written to the store only when the drag ends.
+            // Told to the player as well as the store so a level changed while
+            // something is sounding is heard at once. Nothing is sounding on
+            // this screen, so in practice this only sets where the next match
+            // starts — but the two can never drift apart.
             music.setVolume(level)
         }
-        .disabled(isSilent)
-        .opacity(isSilent ? 0.45 : 1)
     }
 
-    private var musicEmptyNote: some View {
-        statusLine(
-            "No music found. The app ships without any. Put mp3, m4a, aac or wav "
-            + "files in the folder below and tap Rescan — they appear here as a list.",
-            tint: Palette.textSecondary,
-            symbol: "music.note.list"
-        )
-    }
-
-    /// What the player is actually doing, which is not always what was chosen:
-    /// a track can be selected and the app still silent because the device is
-    /// playing the owner's own audio.
+    /// Says so when the level is moot, rather than letting a live-looking
+    /// slider imply music that has been switched off.
     @ViewBuilder
-    private var musicStatus: some View {
-        if let track = music.nowPlaying {
-            statusLine("Now playing \(track.title).", tint: Palette.positive, symbol: "music.note")
-        } else if music.suspension == .otherAudio {
+    private var musicOffNote: some View {
+        if settings.musicSelection == .off {
             statusLine(
-                "Your device is already playing something, so the game stays quiet. "
-                + "The music starts when that stops.",
-                tint: Palette.warning,
+                "Music is switched off for your next game. Turn it back on where a game starts.",
+                tint: Palette.textSecondary,
                 symbol: "speaker.slash.fill"
             )
         }
     }
 
+    /// Where extra tracks go.
+    ///
+    /// The app ships four of its own, so this is an addition rather than the
+    /// only way to get any — but the folder is still the one place a replacement
+    /// or an extra track can be dropped without a rebuild. There is no Rescan
+    /// button because the screen that lists the tracks re-reads the folder every
+    /// time it appears.
     private var musicFolderNote: some View {
         VStack(alignment: .leading, spacing: Metrics.spacingXS) {
-            Text("Music folder").sectionLabel()
+            Text("Extra music").sectionLabel()
+
+            Text("Put mp3, m4a, aac or wav files in this folder and they join the list you choose from before a game.")
+                .font(Typeface.body(13))
+                .foregroundStyle(Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Text(music.library.addedTracksPath)
                 .font(Typeface.body(11).monospaced())
@@ -405,11 +423,6 @@ struct SettingsView: View {
                     fill: Palette.panelActive.opacity(0.5),
                     stroke: Palette.border
                 )
-
-            WideButton(title: "Rescan for music", style: .secondary) {
-                music.refreshLibrary()
-            }
-            .padding(.top, Metrics.spacingXS)
         }
     }
 
