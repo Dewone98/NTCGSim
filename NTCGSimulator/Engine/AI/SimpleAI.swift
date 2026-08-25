@@ -164,6 +164,22 @@ struct SimpleAI {
             return ability
         }
 
+        // 1b. Lethal on the Leader, before anything else spends the attacker.
+        //
+        //     This sits ahead of the summon step deliberately. Without it the
+        //     greedy policy could EX Summon using the one standing attacker
+        //     that had the win on board as the material, then attack a rested
+        //     body because `attackAction` takes any kill before it ever looks
+        //     at the face, chip the Leader for less than lethal, and pass with
+        //     the opponent alive on one life. That is a game it had already won.
+        //
+        //     It matters beyond the Genin tier too: the search rolls out with
+        //     this same policy, so a rollout that fumbles a win mis-scores the
+        //     position it came from.
+        if let lethal = lethalAttackAction(engine: engine, slot: slot, legal: legal) {
+            return lethal
+        }
+
         // 2. Summon the most valuable body on offer. The engine has already
         //    gated the normal summon and every EX Summon Requirement.
         if let summon = bestSummon(engine: engine, slot: slot, legal: legal) {
@@ -294,6 +310,44 @@ struct SimpleAI {
 
         return attacks.first { $0.target == .leader }
             .map { .declareAttack(attacker: $0.attacker, target: $0.target) }
+    }
+
+    /// An attack on the enemy Leader that ends the game this turn.
+    ///
+    /// A hit on the Leader spends the attacker's DAMAGE stat, not its power —
+    /// `GameEngine` line 818 onward — so this reads damage, and reads it live
+    /// so a buff counts. Returns nil when nothing on the board finishes it.
+    private func lethalAttackAction(
+        engine: GameEngine, slot: PlayerSlot, legal: [GameAction]
+    ) -> GameAction? {
+        let enemyLife = engine.side(slot.opposing).life
+        guard enemyLife > 0 else { return nil }
+
+        for action in legal {
+            guard case .declareAttack(let attacker, let target) = action,
+                  case .leader = target,
+                  let damage = attackerDamage(attacker, engine: engine, slot: slot),
+                  damage >= enemyLife
+            else { continue }
+            return action
+        }
+        return nil
+    }
+
+    /// Damage at resolution time, mirroring the engine's own Leader-hit rule:
+    /// a character's live damage stat including bonuses, the Leader's printed
+    /// damage.
+    private func attackerDamage(
+        _ attacker: AttackerReference, engine: GameEngine, slot: PlayerSlot
+    ) -> Int? {
+        switch attacker {
+        case .leader:
+            return engine.leaderCard(for: slot)?.damage ?? 0
+        case .character(let id):
+            guard let character = engine.side(slot).character(id: id),
+                  let card = engine.card(for: character) else { return nil }
+            return character.damageStat(of: card)
+        }
     }
 
     /// Power at resolution time: a character's live effective power — buffs
